@@ -87,6 +87,25 @@ passes a real job, `.\remove-docker-stack.ps1` drops the images and **compacts
 `docker_data.vhdx`** (pruning alone does not return the space to Windows — the
 virtual disk keeps its high-water mark).
 
+**Done on 13 Nov 2026:** all images, containers, volumes and build cache were
+removed and the VHDX compacted **42.26 GB → 25.82 GB** (16.4 GB returned to C:).
+The remaining 25.8 GB is allocated space the compact cannot reach because the
+filesystem inside still marks it as used; uninstalling Docker Desktop removes
+the file entirely. Run `.\remove-docker-stack.ps1 -CompactOnly` in an elevated
+shell for the compaction step alone — it is skipped when the engine is down,
+because `docker compose down` would try to start the VM and hang.
+
+### Footprint (measured)
+
+| | Size |
+|---|---|
+| Native venv (`F:\openshorts-venv`, torch cu128 + all requirements) | 5.56 GB |
+| `node_modules` (dashboard + render-service + remotion) | 0.81 GB |
+| Downloaded torch wheel kept for reinstalls (`F:\wheels`, optional) | 2.57 GB |
+| Docker's `docker_data.vhdx` after compaction | 25.82 GB |
+| Docker's `docker_data.vhdx` before removal | 42.26 GB |
+
+
 ## MCP — full agent control
 
 The API already served an MCP endpoint at `/mcp` (Streamable HTTP, self-host
