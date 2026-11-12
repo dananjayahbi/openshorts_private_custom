@@ -3,6 +3,23 @@
 Everything below is already applied in this fork. It is the map of what was
 changed, why, and how to run it.
 
+## Repository
+
+This checkout is a private fork, not a clone that follows upstream:
+
+| Remote | URL |
+|---|---|
+| `origin` | `https://github.com/dananjayahbi/openshorts_private_custom.git` |
+
+`upstream` (`mutonby/openshorts`) was **removed**, and is intentionally not
+tracked: `main` tracks `origin/main`. The clone had been shallow (depth 1),
+which is why the first push was rejected with `did not receive expected object`;
+it was deepened with a one-off
+`git fetch --unshallow https://github.com/mutonby/openshorts.git` (15 MB, no
+remote added), so all 663 commits of history are present. To pull upstream
+changes later, fetch the URL directly and merge — do not re-add a tracking
+remote unless you want the connection back.
+
 ## Run it
 
 ```powershell
