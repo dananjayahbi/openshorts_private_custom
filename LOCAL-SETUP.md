@@ -3,6 +3,55 @@
 Everything below is already applied in this fork. It is the map of what was
 changed, why, and how to run it.
 
+## MCP — full agent control
+
+The API already served an MCP endpoint at `/mcp` (Streamable HTTP, self-host
+open, no key). It now covers the whole pipeline *without any model key*: an
+agent can be the moment picker.
+
+| Tool | What it does |
+|---|---|
+| `process_video` | clip a URL/upload in one call (AI picks moments — needs a key or local LLM) |
+| `prepare_transcript` | download + transcribe only, **no key**, no render |
+| `get_transcript` | text, language, duration and segment timings (word timings with `include_words`) |
+| `render_plan` | render clips from an explicit `{start,end,title,hook}` list, reusing the prepared source (no second download or transcription) |
+| `get_job_status` / `list_clips` | poll and read results |
+| `add_subtitles` / `recut_clip` | restyle captions, re-cut an existing clip |
+| `get_overview` / `list_gallery` | machine stats and the global library |
+| `publish_clip` / `create_upload` / `get_quota` | social posting, file uploads, plan minutes |
+
+### The keyless agent flow
+
+```text
+prepare_transcript(url)        → job_id
+get_job_status(job_id)         → completed
+get_transcript(job_id)         → segments with start/end
+render_plan(source_job_id, [
+  {start, end, title, hook, description}, …
+])                             → job_id → list_clips
+```
+
+`main.py --transcribe-only` stops after the transcript (`TRANSCRIPT_READY`),
+and `main.py --clip-plan` renders the supplied cuts, snapping them to word
+boundaries. `render_plan` points the new job at the prepared job's source
+(`source_job_id`), so a second pass costs no download and no Whisper run.
+Verified end to end on a local speech clip: prepare → transcript → two planned
+clips rendered with captions and hooks in 46 s.
+
+Registered for OpenCode in `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+"openshorts": { "type": "remote", "url": "http://localhost:18480/mcp", "oauth": false }
+```
+
+### Key handling
+
+`GEMINI_API_KEY` stays in `.env` and is optional everywhere: a plan-driven job
+needs no model, and `process_video` falls back to `LLM_BASE_URL` when a local
+OpenAI-compatible server is configured. `/api/process` now accepts
+`clip_plan`, `transcribe_only` and `source_job_id`, and only demands a key when
+the AI moment picker is actually going to run.
+
 ## Repository
 
 This checkout is a private fork, not a clone that follows upstream:

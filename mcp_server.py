@@ -336,6 +336,108 @@ TOOLS = [
             "required": ["job_id", "clip_index", "platforms"],
         },
     },
+    {
+        "name": "prepare_transcript",
+        "title": "Download a video and return its transcript (no model key)",
+        "description": (
+            "First half of the agent flow. Downloads the source, transcribes it and "
+            "stops before any analysis or render - no Gemini/local-LLM key is used. "
+            "Returns a job_id; poll get_job_status until 'completed', then call "
+            "get_transcript. Use this when the caller wants to choose the clips "
+            "itself, or on a machine without a model key."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_url": {"type": "string",
+                               "description": "Public video URL, as the user gave it."},
+                "upload_id": {"type": "string",
+                              "description": "Instead of source_url: an id from create_upload."},
+                "confirm_rights": {"type": "boolean",
+                                   "description": "Must be true: the user owns the content."},
+            },
+            "required": ["confirm_rights"],
+        },
+    },
+    {
+        "name": "get_transcript",
+        "title": "Read a job's transcript with word timings",
+        "description": (
+            "The transcript of a prepared or finished job: full text, language, "
+            "duration and word-level start/end times (transcript.segments[].words). "
+            "Read it, choose the moments, then call render_plan with their seconds."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "render_plan",
+        "title": "Render clips from an explicit plan (no model key)",
+        "description": (
+            "Second half of the agent flow: render vertical clips from the clips YOU "
+            "chose, reusing a source job's downloaded file and transcript (no second "
+            "download, no second transcription, no API key). Each clip is "
+            "{start, end} in seconds, optional title/hook/description. Cuts are "
+            "snapped to word boundaries. Poll get_job_status, then list_clips."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_job_id": {"type": "string",
+                                  "description": "Job id from prepare_transcript (or any job whose source is still on disk)."},
+                "clips": {
+                    "type": "array", "minItems": 1, "maxItems": 15,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {"type": "number", "description": "Seconds in the SOURCE video."},
+                            "end": {"type": "number", "description": "Seconds in the SOURCE video."},
+                            "title": {"type": "string"},
+                            "hook": {"type": "string", "description": "First-seconds overlay text."},
+                            "description": {"type": "string", "description": "TikTok/IG caption."},
+                            "score": {"type": "number"},
+                        },
+                        "required": ["start", "end"],
+                    },
+                },
+                "captions": {"type": "boolean", "description": "Burn word-level captions. Default true."},
+                "auto_hook": {"type": "boolean", "description": "Burn the hook line. Default true."},
+                "hook_style": {"type": "string",
+                               "enum": ["pill", "classic", "dark", "yellow", "red", "outline", "outline_yellow"]},
+                "output_format": {"type": "string", "enum": ["auto", "vertical", "horizontal", "square"]},
+                "confirm_rights": {"type": "boolean",
+                                   "description": "Must be true: the user owns the content."},
+            },
+            "required": ["source_job_id", "clips", "confirm_rights"],
+        },
+    },
+    {
+        "name": "get_overview",
+        "title": "Machine and library overview",
+        "description": (
+            "What this install has done and what it can do now: clips and videos "
+            "rendered, jobs in flight, library disk usage and GPU memory/utilisation."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_gallery",
+        "title": "Every clip rendered on this machine",
+        "description": (
+            "The global library, newest job first: clip title, hook, platform "
+            "captions, duration and download URL. Paginated with limit/offset."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+        },
+    },
 ]
 
 # Behaviour hints hosts use to decide what needs the user's confirmation; the
@@ -352,6 +454,11 @@ _ANNOTATIONS = {
     # Replaces the clip's current render with the new cut.
     "recut_clip": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False},
     "publish_clip": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+    "prepare_transcript": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
+    "get_transcript": _READ,
+    "render_plan": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False},
+    "get_overview": _READ,
+    "list_gallery": _READ,
 }
 for _tool in TOOLS:
     _tool["annotations"] = {"title": _tool["title"], **_ANNOTATIONS[_tool["name"]]}
@@ -382,8 +489,10 @@ async def _tool_process_video(client, args):
     if not args.get("confirm_rights"):
         return {"error": "confirm_rights must be true: the user must own the "
                          "content or hold the rights to process it."}, True
-    if not args.get("source_url") and not args.get("upload_id"):
-        return {"error": "Give source_url (a public video link) or upload_id (from create_upload)."}, True
+    if not args.get("source_url") and not args.get("upload_id") and not args.get("source_job_id"):
+        return {"error": ("Give source_url (a public video link), upload_id "
+                          "(from create_upload) or source_job_id (an already "
+                          "downloaded source) - optionally with clip_plan.")}, True
     body = {
         "url": args.get("source_url"),
         "upload_id": args.get("upload_id"),
@@ -393,6 +502,8 @@ async def _tool_process_video(client, args):
         "force_low_quality": bool(args.get("force_low_quality")),
         "webhook_url": args.get("webhook_url"),
         "webhook_secret": args.get("webhook_secret"),
+        "source_job_id": args.get("source_job_id"),
+        "clip_plan": args.get("clip_plan"),
     }
     for k in ("target_clips", "clip_min_seconds", "clip_max_seconds", "captions"):
         if args.get(k) is not None:
@@ -414,6 +525,91 @@ async def _tool_process_video(client, args):
         return data, False
     data["hint"] = ("Processing takes minutes. Poll get_job_status every 30-60s"
                     + ("" if body["webhook_url"] else " (or re-run with webhook_url for a callback)") + ".")
+    return data, False
+
+
+async def _tool_prepare_transcript(client, args):
+    if not args.get("confirm_rights"):
+        return {"error": "confirm_rights must be true: the user must own the "
+                         "content or hold the rights to process it."}, True
+    if not args.get("source_url") and not args.get("upload_id"):
+        return {"error": "Give source_url (a public video link) or upload_id."}, True
+    body = {
+        "url": args.get("source_url"),
+        "upload_id": args.get("upload_id"),
+        "acknowledged": True,
+        "transcribe_only": True,
+    }
+    resp = await client.post("/api/process", json=body)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    data = resp.json()
+    data["hint"] = ("Download + transcription only: poll get_job_status until "
+                    "completed, then get_transcript.")
+    return data, False
+
+
+async def _tool_get_transcript(client, args):
+    resp = await client.get(f"/api/jobs/{args['job_id']}/transcript")
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    data = resp.json()
+    # The raw word timings are the point of this call; the client can read the
+    # flat text for a quick scan and the segments for exact seconds.
+    data["hint"] = ("Choose start/end seconds from transcript.segments[].words "
+                    "and pass them to render_plan with this job as source_job_id.")
+    return data, False
+
+
+async def _tool_render_plan(client, args):
+    if not args.get("confirm_rights"):
+        return {"error": "confirm_rights must be true: the user must own the "
+                         "content or hold the rights to process it."}, True
+    clips = args.get("clips") or []
+    if not isinstance(clips, list) or not clips:
+        return {"error": "clips must be a non-empty list of {start, end}."}, True
+    body = {
+        "source_job_id": args["source_job_id"],
+        "clip_plan": {"shorts": clips},
+        "acknowledged": True,
+    }
+    for k in ("captions", "output_format"):
+        if args.get(k) is not None:
+            body[k] = args[k]
+    if args.get("auto_hook", True):
+        body["auto_hook"] = True
+        if args.get("hook_style"):
+            body["auto_hook_style"] = args["hook_style"]
+    resp = await client.post("/api/process", json=body)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    data = resp.json()
+    data["hint"] = ("Rendering the plan takes a few minutes. Poll get_job_status, "
+                    "then list_clips.")
+    return data, False
+
+
+async def _tool_get_overview(client, args):
+    resp = await client.get("/api/overview")
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    return resp.json(), False
+
+
+async def _tool_list_gallery(client, args):
+    params = {}
+    if args.get("limit") is not None:
+        params["limit"] = args["limit"]
+    if args.get("offset") is not None:
+        params["offset"] = args["offset"]
+    resp = await client.get("/api/gallery/clips", params=params)
+    if resp.status_code >= 400:
+        return _api_error(resp), True
+    data = resp.json()
+    base = str(client.base_url).rstrip("/")
+    for clip in data.get("clips") or []:
+        if isinstance(clip.get("url"), str) and clip["url"].startswith("/"):
+            clip["download_url"] = _clip_url(base, clip["url"])
     return data, False
 
 
@@ -598,6 +794,11 @@ _TOOL_IMPLS = {
     "add_subtitles": _tool_add_subtitles,
     "recut_clip": _tool_recut_clip,
     "publish_clip": _tool_publish_clip,
+    "prepare_transcript": _tool_prepare_transcript,
+    "get_transcript": _tool_get_transcript,
+    "render_plan": _tool_render_plan,
+    "get_overview": _tool_get_overview,
+    "list_gallery": _tool_list_gallery,
 }
 
 

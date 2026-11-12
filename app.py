@@ -4579,6 +4579,12 @@ def _finish_job(job_id, returncode, output_dir):
         jobs[job_id]['status'] = 'completed'
         jobs[job_id]['logs'].append("Process finished successfully.")
 
+        # Agent flow: a transcribe-only run deliberately produces no clips.
+        # Its success marker is the transcript, not a metadata file.
+        if os.path.isfile(os.path.join(output_dir, "agent_transcript.json")):
+            jobs[job_id]['logs'].append("Transcript ready (no clips requested).")
+            return
+
         # Self-host: silent AWS S3 backup. Cloud mode stores to R2 instead
         # (see _archive_managed_job), so skip the redundant/paid AWS upload.
         if not BILLING_ENABLED:
@@ -5517,9 +5523,16 @@ async def process_endpoint(
     max_minutes: Optional[str] = Form(None),
     source_start: Optional[str] = Form(None),
     source_end: Optional[str] = Form(None),
+    clip_plan: Optional[str] = Form(None),
+    transcribe_only: Optional[str] = Form(None),
+    source_job_id: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
+    # Agent flow: a supplied clip plan (or a transcription-only run) needs no
+    # model at all - the caller is the moment picker. Everything else still
+    # requires a key or a local OpenAI-compatible server.
+    if (not api_key and not (llm_backend.active() and not BILLING_ENABLED)
+            and not (clip_plan or transcribe_only)):
         # Self-host with an OpenAI-compatible server configured needs no
         # Google key for the core pipeline: the moment picker runs there and
         # the frame-based stages degrade on their own (layout_picker returns
@@ -5551,6 +5564,9 @@ async def process_endpoint(
         max_minutes = body.get("max_minutes")
         source_start = body.get("source_start")
         source_end = body.get("source_end")
+        clip_plan = body.get("clip_plan")
+        transcribe_only = body.get("transcribe_only")
+        source_job_id = body.get("source_job_id")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -5580,7 +5596,7 @@ async def process_endpoint(
     if upload_id and not url and not file and not thumb_session:
         upload_slot = _take_pending_upload(upload_id, await _owner_id(request))
 
-    if not url and not file and not thumb_session and not upload_slot:
+    if not url and not file and not thumb_session and not upload_slot and not source_job_id:
         raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
@@ -5729,6 +5745,32 @@ async def process_endpoint(
             with open(transcript_path, "w") as f:
                 json.dump(thumb_session["transcript"], f)
             cmd.extend(["--transcript", transcript_path])
+    elif source_job_id:
+        # Agent flow: render from a source another job already downloaded and
+        # transcribed. A second pass on the same video therefore costs no
+        # download and no Whisper run - the agent only supplies the cuts.
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", str(source_job_id)):
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail="Invalid source_job_id")
+        src_job_dir = os.path.join(OUTPUT_DIR, str(source_job_id))
+        src_file = _job_source_video(src_job_dir, str(source_job_id)) if os.path.isdir(src_job_dir) else None
+        if not src_file:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            raise HTTPException(status_code=404, detail=(
+                "source_job_id has no source video on disk. It may have expired "
+                "(JOB_RETENTION_SECONDS) or never kept the original."))
+        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{os.path.basename(src_file)}")
+        try:
+            os.link(src_file, input_path)
+        except OSError:
+            shutil.copyfile(src_file, input_path)
+        cmd.extend(["-i", input_path])
+        src_transcript = _job_transcript(src_job_dir)
+        if src_transcript and src_transcript.get("segments"):
+            transcript_path = os.path.join(job_output_dir, "source_transcript.json")
+            with open(transcript_path, "w") as f:
+                json.dump(src_transcript, f)
+            cmd.extend(["--transcript", transcript_path])
     elif upload_slot:
         # Move the pre-uploaded file under the job's name so it is cleaned up
         # with the job like any other upload; the slot is consumed.
@@ -5772,6 +5814,43 @@ async def process_endpoint(
     cmd.extend(["-o", job_output_dir])
     if output_format and output_format != "auto":
         cmd.extend(["--format", output_format])
+
+    # Agent-selected clips: validate the shape here, write it into the job dir
+    # and let main.py snap/render it. Bad plans are rejected before any work.
+    if clip_plan:
+        if isinstance(clip_plan, str):
+            try:
+                clip_plan = json.loads(clip_plan)
+            except json.JSONDecodeError:
+                shutil.rmtree(job_output_dir, ignore_errors=True)
+                raise HTTPException(status_code=400, detail="clip_plan must be JSON")
+        shorts = clip_plan.get("shorts") if isinstance(clip_plan, dict) else clip_plan
+        if not isinstance(shorts, list) or not shorts:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=(
+                "clip_plan needs at least one {start, end} entry"))
+        for i, item in enumerate(shorts):
+            if not isinstance(item, dict):
+                shutil.rmtree(job_output_dir, ignore_errors=True)
+                raise HTTPException(status_code=400, detail=f"clip_plan[{i}] must be an object")
+            try:
+                start, end = float(item.get("start")), float(item.get("end"))
+            except (TypeError, ValueError):
+                shutil.rmtree(job_output_dir, ignore_errors=True)
+                raise HTTPException(status_code=400,
+                                    detail=f"clip_plan[{i}] needs numeric start/end")
+            if end <= start or start < 0:
+                shutil.rmtree(job_output_dir, ignore_errors=True)
+                raise HTTPException(status_code=400,
+                                    detail=f"clip_plan[{i}]: needs 0 <= start < end")
+        plan_path = os.path.join(job_output_dir, "clip_plan.json")
+        with open(plan_path, "w") as f:
+            json.dump({"shorts": shorts}, f)
+        cmd.extend(["--clip-plan", plan_path])
+        print(f"[agent-plan] job={job_id} clips={len(shorts)}")
+
+    if str(transcribe_only).lower() in ("1", "true", "yes"):
+        cmd.append("--transcribe-only")
 
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
@@ -9473,6 +9552,149 @@ async def thumbnail_publish_status(publish_id: str, request: Request):
     record = publish_jobs[publish_id]
     await _assert_job_owner(request, record)
     return {k: v for k, v in record.items() if k != "user_id"}
+
+
+def _job_source_video(job_dir, job_id=None):
+    """The source file of a job dir, or None.
+
+    Prefers what the job recorded (``agent_transcript.json`` for a
+    transcribe-only run, then metadata's ``source_video``), then falls back to
+    the largest mp4 that is not one of our own renders. Uploaded sources live
+    in ``uploads/`` prefixed with the job id, not in the job dir, so that is the
+    last place checked.
+    """
+    names = []
+    agent_path = os.path.join(job_dir, "agent_transcript.json")
+    if os.path.isfile(agent_path):
+        try:
+            with open(agent_path) as f:
+                names.append((json.load(f) or {}).get("source_video"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    for meta in glob.glob(os.path.join(job_dir, "*_metadata.json")):
+        try:
+            with open(meta) as f:
+                names.append((json.load(f) or {}).get("source_video"))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    for name in names:
+        if not name:
+            continue
+        for candidate in (os.path.join(job_dir, name),
+                          os.path.join(UPLOAD_DIR, os.path.basename(name))):
+            if os.path.isfile(candidate):
+                return candidate
+        if job_id:
+            for candidate in glob.glob(os.path.join(
+                    UPLOAD_DIR, f"{job_id}_{os.path.basename(name)}")):
+                if os.path.isfile(candidate):
+                    return candidate
+
+    candidates = []
+    for path in glob.glob(os.path.join(job_dir, "*.mp4")):
+        base = os.path.basename(path)
+        if "_clip_" in base or base.startswith(("wm_", "subtitled_", "recut_", "temp_")):
+            continue
+        try:
+            candidates.append((os.path.getsize(path), path))
+        except OSError:
+            pass
+    if candidates:
+        return max(candidates)[1]
+
+    if job_id:
+        for path in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")):
+            if path.lower().endswith((".mp4", ".mov", ".mkv", ".webm", ".m4v")):
+                try:
+                    candidates.append((os.path.getsize(path), path))
+                except OSError:
+                    pass
+    return max(candidates)[1] if candidates else None
+
+
+def _job_transcript(job_dir):
+    """The transcript a job already produced: agent transcript first, then the
+    metadata copy. None when the job never got that far."""
+    agent_path = os.path.join(job_dir, "agent_transcript.json")
+    if os.path.isfile(agent_path):
+        try:
+            with open(agent_path) as f:
+                data = json.load(f)
+            inner = data.get("transcript") if isinstance(data, dict) else None
+            if isinstance(inner, dict) and inner.get("segments"):
+                return inner
+        except (OSError, json.JSONDecodeError):
+            pass
+    for meta in glob.glob(os.path.join(job_dir, "*_metadata.json")):
+        try:
+            with open(meta) as f:
+                data = json.load(f) or {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        transcript = data.get("transcript")
+        if isinstance(transcript, dict) and transcript.get("segments"):
+            return transcript
+    return None
+
+
+@app.get("/api/jobs/{job_id}/transcript")
+async def get_job_transcript(job_id: str, include_words: bool = False):
+    """The transcript of a job, for an agent that wants to choose the cuts.
+
+    Works for a ``transcribe_only`` job (written before any render) and for a
+    finished job (the copy stored in metadata). The text plus word timings are
+    everything needed to post a ``clip_plan`` back to /api/process.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", job_id):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    transcript = _job_transcript(job_dir)
+    if not transcript:
+        raise HTTPException(status_code=409, detail=(
+            "No transcript yet. Submit the source with transcribe_only, or wait "
+            "for the job to finish."))
+
+    words = 0
+    text_parts = []
+    segments = []
+    for segment in transcript.get("segments") or []:
+        segment_words = segment.get("words") or []
+        words += len(segment_words)
+        text_parts.append(segment.get("text") or "")
+        entry = {
+            "start": segment.get("start"),
+            "end": segment.get("end"),
+            "text": (segment.get("text") or "").strip(),
+        }
+        if include_words:
+            entry["words"] = segment_words
+        segments.append(entry)
+
+    meta = {}
+    agent_path = os.path.join(job_dir, "agent_transcript.json")
+    if os.path.isfile(agent_path):
+        try:
+            with open(agent_path) as f:
+                meta = json.load(f) or {}
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+
+    # Cuts are chosen from segment times; per-word timings are only needed for
+    # karaoke-precise edits, so they cost a second request (include_words) -
+    # a 10-minute talk is ~1.4k words and would otherwise flood the caller.
+    return {
+        "job_id": job_id,
+        "language": transcript.get("language") or meta.get("language"),
+        "duration": meta.get("duration"),
+        "source_video": meta.get("source_video"),
+        "text": " ".join(t for t in text_parts if t).strip(),
+        "word_count": words,
+        "segments": segments,
+    }
 
 
 def _gallery_clip_file(output_dir, clip_index):

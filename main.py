@@ -2062,6 +2062,70 @@ def score_batch_size():
     return 3 if llm_backend.active() else 8
 
 
+def load_agent_plan(path, transcript, video_duration):
+    """Clips chosen by an agent instead of the LLM moment picker.
+
+    An MCP client can read the transcript (``--transcribe-only``) and post the
+    moments it wants back as ``{'shorts': [{start, end, title, hook, ...}]}``.
+    That keeps the whole pipeline usable with no model key at all: the agent is
+    the moment picker.
+
+    The cuts are snapped to word boundaries exactly like an AI proposal (no
+    mid-word starts), but the plan's own duration is respected — an agent
+    asking for a 9-second beat does not get it stretched to the 15 s floor — and
+    order is kept as given, not re-sorted, so clip 1 stays clip 1.
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    raw = data.get('shorts') if isinstance(data, dict) else data
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError("Clip plan is empty: expected {'shorts': [{start, end}, ...]}.")
+
+    words = []
+    for segment in (transcript or {}).get('segments', []):
+        for word in segment.get('words', []):
+            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
+
+    shorts = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise RuntimeError(f"Clip {index + 1}: expected an object with start/end.")
+        try:
+            start = float(item.get('start'))
+            end = float(item.get('end'))
+        except (TypeError, ValueError):
+            raise RuntimeError(f"Clip {index + 1}: start and end must be numbers (seconds).")
+        if end <= start:
+            raise RuntimeError(f"Clip {index + 1}: end ({end}) must be after start ({start}).")
+        if start < 0:
+            raise RuntimeError(f"Clip {index + 1}: start must be >= 0.")
+        end = min(end, float(video_duration or end))
+        snapped_start, snapped_end = snap_clip_to_words(
+            start, end, words, video_duration,
+            min_duration=1.0, max_duration=max(1.0, float(video_duration or end)))
+        title = (item.get('title') or item.get('video_title_for_youtube_short')
+                 or f"Clip {index + 1}")
+        hook = (item.get('hook') or item.get('viral_hook_text')
+                or item.get('title') or f"Clip {index + 1}")
+        description = (item.get('description')
+                       or item.get('video_description_for_tiktok') or "")
+        shorts.append({
+            "start": round(float(snapped_start), 3),
+            "end": round(float(snapped_end), 3),
+            "source_window_id": f"agent_plan_{index + 1}",
+            "predicted_score": item.get("score", 100),
+            "video_description_for_tiktok": description,
+            "video_description_for_instagram": (
+                item.get('video_description_for_instagram') or description),
+            "video_title_for_youtube_short": title,
+            "viral_hook_text": hook,
+            "why": item.get("why") or "Chosen by the agent from the transcript.",
+            "proposed": [round(start, 3), round(end, 3)],
+        })
+    print(f"🧭 Agent plan: {len(shorts)} clip(s), no model key needed.")
+    return {"shorts": shorts}
+
+
 def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
     """Two-pass clip selection: score transcript windows, then detail the best.
 
@@ -2502,6 +2566,14 @@ if __name__ == '__main__':
     parser.add_argument('--prepare-only', action='store_true',
                         help="Fetch the source (download, cut to the paid minutes), print "
                              "SOURCE_READY <path> and exit: a remote worker renders it.")
+    parser.add_argument('--clip-plan', type=str,
+                        help="JSON file with the clips to render ({'shorts': [{start, end, title, "
+                             "hook, description}]}). Skips the AI moment picker, so no model key "
+                             "is needed — an agent can read the transcript and choose the cuts.")
+    parser.add_argument('--transcribe-only', action='store_true',
+                        help="Download/transcribe the source, write its transcript next to the "
+                             "job, print TRANSCRIPT_READY <path> and exit. Used by the agent flow "
+                             "to choose clips before any render.")
 
     args = parser.parse_args()
     output_format = args.format
@@ -2789,11 +2861,26 @@ if __name__ == '__main__':
                   f"switching to visual analysis.")
             transcript = None
 
+        # Agent flow: hand the transcript back and stop, so an MCP client can
+        # choose the moments itself. No model key is consulted on this path.
+        if args.transcribe_only:
+            transcript_path = os.path.join(output_dir, "agent_transcript.json")
+            write_json_atomic(transcript_path, {
+                "transcript": transcript or {"language": "none", "segments": []},
+                "duration": duration,
+                "source_video": os.path.basename(input_video),
+                "language": (transcript or {}).get("language") or "unknown",
+            }, indent=2)
+            print(f"TRANSCRIPT_READY {transcript_path}", flush=True)
+            sys.exit(0)
+
         # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
         early_clips = (early_state or {}).get("clips") if early_state else None
-        if (transcript is not None and early_clips
+        if args.clip_plan:
+            clips_data = load_agent_plan(args.clip_plan, transcript, duration)
+        elif (transcript is not None and early_clips
                 and transcript is early_state["transcript"]):
-            print("♻️ Using the clips Gemini picked while the video downloaded.")
+            print("\u267b\ufe0f Using the clips Gemini picked while the video downloaded.")
             clips_data = early_clips
         elif transcript is not None:
             clips_data = get_viral_clips(transcript, duration, viewer_clips=viewer_clips)
