@@ -26,6 +26,7 @@ GPU whisper in turn falls back to CPU whisper on CUDA errors (VRAM is shared
 with other models on the host, so loads can OOM under load).
 """
 import os
+import platform_compat
 import re
 import subprocess
 import sys
@@ -84,7 +85,6 @@ class host_asr_slot:
         if self.slots <= 0:
             return self
         try:
-            import fcntl
             os.makedirs(self.lock_dir, exist_ok=True)
         except Exception:
             return self
@@ -97,13 +97,11 @@ class host_asr_slot:
                     fh = open(path, "a+")
                 except OSError:
                     return self
-                try:
-                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if platform_compat.try_lock(fh):
                     self._fh = fh
                     ASR_WAIT["s"] += time.monotonic() - started
                     return self
-                except OSError:
-                    fh.close()
+                fh.close()
             if not announced:
                 print("🎙️ Waiting for a free transcription slot…", flush=True)
                 announced = True
@@ -112,8 +110,7 @@ class host_asr_slot:
     def __exit__(self, *exc):
         if self._fh is not None:
             try:
-                import fcntl
-                fcntl.flock(self._fh, fcntl.LOCK_UN)
+                platform_compat.unlock(self._fh)
             except Exception:
                 pass
             self._fh.close()

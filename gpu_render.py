@@ -27,6 +27,7 @@ import tempfile
 import time
 
 import gpu_decode
+import platform_compat
 from ffmpeg_utils import QUALITY_FAST, _NVENC_ARGS, nvenc_available
 
 ENABLED = os.environ.get("GPU_RENDER", "1").strip() != "0"
@@ -364,7 +365,6 @@ def nvenc_slot():
     if slots <= 0 or not lock_dir or not os.path.isdir(lock_dir) or not os.access(lock_dir, os.W_OK):
         yield
         return
-    import fcntl
     try:
         max_wait = int(os.environ.get("NVENC_SLOT_WAIT", "600"))
     except ValueError:
@@ -376,12 +376,10 @@ def nvenc_slot():
                 f = open(os.path.join(lock_dir, f".nvenc-{i}.lock"), "a")
             except OSError:
                 continue
-            try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if platform_compat.try_lock(f):
                 held = f
                 break
-            except OSError:
-                f.close()
+            f.close()
         if held is None:
             time.sleep(1)
             waited += 1

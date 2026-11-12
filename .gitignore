@@ -52,3 +52,7 @@ CLAUDE.local.md
 
 # Rust build output
 osrender/target/
+
+# Native (no Docker) run: machine-specific, generated at setup
+fonts/fonts.local.conf
+logs/

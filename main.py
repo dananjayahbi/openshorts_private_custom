@@ -29,6 +29,7 @@ import gemini_worker
 import hook_grounding
 import layout_picker
 import llm_backend
+import platform_compat
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
@@ -823,7 +824,7 @@ def cap_source_duration(input_video, max_minutes, safety=False, start_seconds=0.
                "-t", f"{secs:.3f}", *codec_args, "-movflags", "+faststart", tmp]
         try:
             subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
-            os.replace(tmp, input_video)
+            platform_compat.replace_with_retry(tmp, input_video)
             shown = f"{int(math.ceil(duration / 60))}" if duration else "?"
             if start:
                 try:
@@ -908,7 +909,9 @@ def _download_youtube_video(url, output_dir=".", on_audio=None, allow_paid=True,
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
 
-    cookies_path = '/app/cookies.txt'
+    # Repo-root cookies file: the same line works in the container (/app)
+    # and natively, where /app does not exist.
+    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
     cookies_env = os.environ.get("YOUTUBE_COOKIES")
     if cookies_env:
         print("🍪 Found YOUTUBE_COOKIES env var, creating cookies file inside container...")
@@ -1594,7 +1597,7 @@ def apply_watermark(video_path, output_path=None):
         ok=lambda r: r.returncode == 0 and os.path.exists(tmp_path),
         path=video_path)
     if result.returncode == 0 and os.path.exists(tmp_path):
-        os.replace(tmp_path, output_path or video_path)
+        platform_compat.replace_with_retry(tmp_path, output_path or video_path)
         return True
     err = (result.stderr or b"").decode(errors="ignore")[-300:]
     print(f"   ⚠️ Watermark pass failed (clip kept unmarked): {err}")
@@ -2611,11 +2614,7 @@ if __name__ == '__main__':
     def _report_job_cpu():
         """CPU time of the whole job (this process + every ffmpeg it waited
         for) for app.py's log, to compare pipeline versions per job."""
-        import resource
-        own = resource.getrusage(resource.RUSAGE_SELF)
-        kids = resource.getrusage(resource.RUSAGE_CHILDREN)
-        py_s = own.ru_utime + own.ru_stime
-        children_s = kids.ru_utime + kids.ru_stime
+        py_s, children_s = platform_compat.cpu_times()
         # Where Parakeet ran (None: this job did not load it). A "cpu" here on
         # a GPU host means the image shipped onnxruntime without CUDA.
         asr = sys.modules.get("transcribe_backends")
@@ -2985,8 +2984,11 @@ if __name__ == '__main__':
                         print(f"CLIP_READY {i} {os.path.basename(served)}")
                     return success
                 finally:
-                    if os.path.exists(clip_temp_path):
-                        os.remove(clip_temp_path)
+                    try:
+                        platform_compat.unlink_with_retry(clip_temp_path)
+                    except OSError as e:
+                        print(f"\u26a0\ufe0f Could not remove "
+                              f"{os.path.basename(clip_temp_path)}: {e}")
 
             # 6, not 3: measured side by side on the GPU host at load 48-67, a 7-clip
             # job finished 16% sooner with the same CPU, and the peak VRAM stayed

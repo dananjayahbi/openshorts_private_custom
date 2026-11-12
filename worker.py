@@ -13,6 +13,7 @@ Run it from the image's /app, so the relative paths of a job (``output/<id>``,
 """
 import json
 import os
+import platform_compat
 import shutil
 import signal
 import socket
@@ -223,7 +224,7 @@ def run_job(job_id, claim):
         log(f"{job_id}: rendering ({os.path.getsize(source) >> 20} MB source)")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=job_env(info.get("env")), cwd=os.getcwd(),
-                                preexec_fn=(lambda: os.nice(NICE)) if NICE else None)
+                                **platform_compat.child_priority_kwargs(NICE))
         uploader = Uploader(job_id, claim, out_dir, skip=[source])
         pending, lock = [], threading.Lock()
 

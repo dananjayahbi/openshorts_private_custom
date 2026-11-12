@@ -1,5 +1,6 @@
 import os
 import llm_backend
+import platform_compat
 import re
 import sys
 import uuid
@@ -4504,7 +4505,7 @@ def _job_nice():
 def _lower_priority():
     n = _job_nice()
     if n:
-        os.nice(n)
+        platform_compat.lower_priority(n)
 
 
 def _job_encode_env(env):
@@ -4640,7 +4641,8 @@ async def _run_main(job_id, cmd, env, tick=None):
         stderr=subprocess.STDOUT, # Merge stderr to stdout
         env=env,
         cwd=os.getcwd(),
-        preexec_fn=_lower_priority,
+        # Windows has no preexec_fn; the priority class is the equivalent.
+        **platform_compat.child_priority_kwargs(_job_nice()),
     )
     # We need to capture logs in a thread because Popen isn't async
     t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))

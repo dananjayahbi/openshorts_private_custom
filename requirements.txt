@@ -6,6 +6,8 @@ torchvision==0.26.0
 tqdm==4.67.3
 yt-dlp
 faster-whisper==1.2.1
+# PyAV 19 dropped the `metadata_errors` kwarg faster-whisper passes to av.open().
+av==18.1.0
 py3langid==0.3.0
 google-genai==1.75.0
 python-dotenv==1.2.2

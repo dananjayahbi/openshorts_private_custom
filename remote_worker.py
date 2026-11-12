@@ -22,8 +22,8 @@ This module holds the parts with no FastAPI or queue in them: what crosses
 the wire, which file names a worker may write, and the file protocol.
 """
 import contextlib
-import fcntl
 import hmac
+import platform_compat
 import json
 import os
 import re
@@ -176,9 +176,7 @@ def upload_lock(job_dir):
     UploadError(429) when another request holds it."""
     fd = os.open(os.path.join(job_dir, LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not platform_compat.try_lock_fd(fd):
             raise UploadError(429, "another upload of this job is in progress")
         yield
     finally:
