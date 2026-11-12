@@ -5052,6 +5052,100 @@ async def get_config():
         "geminiEnvKey": bool(os.environ.get("GEMINI_API_KEY")) and not BILLING_ENABLED,
     }
 
+
+_overview_gpu_cache = {"at": 0.0, "gpu": None}
+
+
+def _gpu_snapshot():
+    """GPU name, memory and utilisation from one nvidia-smi call, cached 10 s.
+
+    The home dashboard refreshes this while it is open; without the cache that
+    would fork a process every few seconds on the same 6 GB card the pipeline
+    is rendering on.
+    """
+    now = time.monotonic()
+    if now - _overview_gpu_cache["at"] < 10:
+        return _overview_gpu_cache["gpu"]
+    gpu = None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+             "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            name, total, used, util, temp = [
+                p.strip() for p in out.stdout.strip().splitlines()[0].split(",")]
+            gpu = {
+                "name": name,
+                "totalMb": int(float(total)),
+                "usedMb": int(float(used)),
+                "utilization": int(float(util)),
+                "temperatureC": int(float(temp)),
+            }
+    except Exception:
+        gpu = None
+    _overview_gpu_cache.update(at=now, gpu=gpu)
+    return gpu
+
+
+@app.get("/api/overview")
+async def get_overview():
+    """Numbers for the home dashboard: library, queue, disk, GPU.
+
+    Counts the same job dirs the Clip Gallery serves, so "videos"/"clips" are
+    what this instance really rendered — not a counter that can drift from the
+    files. A clip counts once even though the dir holds a clean cut, a
+    subtitled copy and (sometimes) a watermark twin.
+    """
+    videos = 0
+    clips = 0
+    thumbs = os.path.basename(THUMBNAILS_DIR)
+    try:
+        names = os.listdir(OUTPUT_DIR)
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(OUTPUT_DIR, name)
+        if name == thumbs or _not_a_job_dir(name) or not os.path.isdir(path):
+            continue
+        json_files = glob.glob(os.path.join(path, "*_metadata.json"))
+        if not json_files:
+            continue
+        try:
+            with open(json_files[0]) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        videos += 1
+        for index, _clip in enumerate(data.get("shorts") or []):
+            if _gallery_clip_file(path, index):
+                clips += 1
+
+    finished = {"completed", "complete", "failed", "cancelled", "error"}
+    active = sum(1 for j in jobs.values()
+                 if str(j.get("status") or "").lower() not in finished)
+
+    storage = {}
+    try:
+        usage = shutil.disk_usage(OUTPUT_DIR)
+        storage = {
+            "usedGb": round(_dir_size(OUTPUT_DIR) / 1024 ** 3, 2),
+            "freeGb": round(usage.free / 1024 ** 3, 1),
+            "totalGb": round(usage.total / 1024 ** 3, 1),
+        }
+    except OSError:
+        pass
+
+    return {
+        "videos": videos,
+        "clips": clips,
+        "activeJobs": active,
+        "storage": storage,
+        "gpu": _gpu_snapshot(),
+    }
+
+
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
     def _run():

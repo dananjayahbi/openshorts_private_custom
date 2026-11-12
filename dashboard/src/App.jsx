@@ -1,15 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
-import ProcessingAnimation from './components/ProcessingAnimation';
+import HomeDashboard from './components/HomeDashboard';
 // import Gallery from './components/Gallery';
 import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
-import SaaShortsTab from './components/SaaShortsTab';
-import UGCGallery from './components/UGCGallery';
 import ScheduleWeekModal from './components/ScheduleWeekModal';
 import ClipEditor from './components/ClipEditor';
 import ReframeEditor from './components/ReframeEditor';
@@ -26,7 +24,6 @@ import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
 import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
-import AutopilotTab from './components/AutopilotTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
 import { useAuth } from './contexts/AuthContext';
@@ -390,7 +387,7 @@ function App() {
     try { return window.innerWidth >= 768; } catch { return true; }
   });
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, ai-agent, thumbnails, settings
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
@@ -995,7 +992,7 @@ function App() {
   // dropped so a reload does not keep forcing the tab.
   const [autopilotConnected, setAutopilotConnected] = useState(null); // connect outcome, see lib/connectReturn.js
   useEffect(() => {
-    const DEEP_LINK_TABS = ['autopilot', 'history', 'settings', 'thumbnails', 'dashboard', 'saasshorts'];
+    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'ai-agent'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
@@ -1350,20 +1347,21 @@ function App() {
 
   // --- UI Components ---
 
-  // One nav definition drives all three surfaces: the desktop rail, the mobile
+  // One nav definition drives all three surfaces: the top rail, the mobile
   // drawer, and the bottom tab bar. `short` is the tab-bar label — the full one
   // wraps to two lines in a 5-up bar on a 360px phone.
+  //
+  // Trimmed to what this fork actually uses: Home, Clip Generator, Clip
+  // Gallery, AI Agent, YouTube Studio, Settings. AI Shorts, UGC, Autopilot,
+  // History and Pricing were removed with their components — they belong to
+  // the hosted product, not to a single-user local install.
   const navItems = [
+    { id: 'home', ord: '00', icon: Home, label: 'Home', short: 'home', primary: true },
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
-    // Cloud only: it runs on the managed pipeline and the Upload-Post connection.
-    ...(billingEnabled ? [{ id: 'autopilot', ord: '02', icon: Rocket, label: 'Autopilot', short: 'autopilot', isNew: true }] : []),
-    { id: 'saasshorts', ord: '03', icon: Sparkles, label: 'AI Shorts', short: 'ai shorts', byok: true, primary: true },
-    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
-    { id: 'gallery', ord: '05', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
-    { id: 'ugc-gallery', ord: '06', icon: Users, label: 'UGC Gallery', short: 'ugc' },
-    { id: 'thumbnails', ord: '07', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
-    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '08', icon: History, label: 'History', short: 'history' }] : []),
-    { id: 'settings', ord: '09', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
+    { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
+    { id: 'thumbnails', ord: '04', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
+    { id: 'settings', ord: '05', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -1422,18 +1420,26 @@ function App() {
     </>
   );
 
-  // Desktop rail: icon-only from md, labelled from lg. Below md it is gone
-  // entirely — an unlabelled 80px rail ate a fifth of a phone screen.
-  const Sidebar = () => (
-    <div className="hidden md:flex w-20 lg:w-64 bg-paper2 border-r border-rule flex-col h-full shrink-0 transition-all duration-300">
-      <a href="#app" onClick={() => goToTab('dashboard')} className="p-6 flex items-center gap-3" title="openshorts home">
-        <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
-          <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
+  // Top rail: brand, the six sections, and the account/settings corner. The
+  // old 80/256px side rail is gone — on a laptop it cost a third of the width
+  // that the clip grid and the editor want, and the reference chrome for this
+  // fork is a horizontal tool bar. Below md it collapses to a menu button and
+  // the existing bottom tab bar.
+  const TopBar = () => (
+    <header className="h-14 shrink-0 border-b border-rule bg-paper2/70 backdrop-blur supports-[backdrop-filter]:bg-paper2/60 flex items-center gap-1.5 sm:gap-2 px-2 sm:px-4 z-30">
+      <a
+        href="#app"
+        onClick={() => goToTab('home')}
+        className="flex items-center gap-2.5 pr-2 shrink-0"
+        title="openshorts home"
+      >
+        <div className="w-7 h-7 bg-paper3 rounded-input flex items-center justify-center overflow-hidden border border-rule">
+          <img src="/logo-openshorts.png" alt="" className="w-full h-full object-cover" />
         </div>
-        <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
+        <span className="font-display lowercase text-lg text-ink hidden xs:block sm:block">openshorts</span>
       </a>
 
-      <nav className="flex-1 px-4 py-4 space-y-1">
+      <nav className="hidden md:flex items-center gap-0.5 min-w-0">
         {navItems.map((item) => {
           const NavIcon = item.icon;
           const isActive = activeTab === item.id;
@@ -1444,27 +1450,50 @@ function App() {
               onClick={() => goToTab(item.id)}
               title={tabLocked(item.id) ? 'Finish your first clips to unlock' : item.label}
               disabled={tabLocked(item.id)}
-              className={`relative w-full flex items-center gap-3 px-3 py-2.5 rounded-input transition-colors ${isActive ? 'bg-paper3 text-ink' : 'text-muted hover:text-ink2 hover:bg-paper3/50'} ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-muted' : ''}`}
+              className={`relative flex items-center gap-2 px-3 py-2 rounded-input text-sm transition-colors whitespace-nowrap ${isActive
+                ? 'bg-paper3 text-ink'
+                : 'text-muted hover:text-ink2 hover:bg-paper3/60'
+                } ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-muted' : ''}`}
             >
+              <NavIcon size={15} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
+              <span className="lowercase">{item.label}</span>
+              {item.byok && !isActive && <span className="readout hidden lg:block">byok</span>}
               {isActive && (
-                <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
+                <span className="absolute left-3 right-3 -bottom-[13px] h-[2px] bg-brass rounded-full" aria-hidden="true" />
               )}
-              <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
-              <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
-              {tabLocked(item.id)
-                ? <Lock size={12} className="shrink-0 hidden lg:block" />
-                : item.byok ? <span className="readout hidden lg:block">BYOK</span>
-                  : item.isNew ? <span className="badge-brass hidden lg:block">new</span> : null}
-              <span className="readout hidden lg:block">{item.ord}</span>
             </button>
           );
         })}
       </nav>
 
-      <div className="p-4 border-t border-rule space-y-1">
-        <NavFooterLinks collapsed />
+      <div className="ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
+        {keysMissing && (
+          <button
+            onClick={() => goToTab('settings')}
+            className="badge-warn hidden sm:inline-flex"
+            title="Set your Gemini API key"
+          >
+            <AlertTriangle size={12} />
+            <span className="hidden md:inline">keys missing</span>
+          </button>
+        )}
+        {status !== 'idle' && (
+          <button onClick={handleReset} className="btn-quiet px-3 py-1.5 text-xs" aria-label="New project">
+            <Plus size={14} />
+            <span className="hidden sm:inline">new</span>
+          </button>
+        )}
+        {billingEnabled && isSignedIn && <ProfileMenu onUpgrade={isManaged ? openUpsell : null} />}
+        <button
+          onClick={() => setNavOpen(true)}
+          aria-label="open navigation"
+          aria-expanded={navOpen}
+          className="md:hidden p-2 rounded-input text-muted active:bg-paper3 transition-colors"
+        >
+          <Menu size={20} />
+        </button>
       </div>
-    </div>
+    </header>
   );
 
   // Mobile drawer: the complete nav, reachable from the header's menu button.
@@ -1576,88 +1605,11 @@ function App() {
     /* h-dvh where supported: on mobile Safari/Chrome `100vh` is the tallest the
        viewport ever gets, so a h-screen shell hides its own bottom bar behind
        the browser chrome until the user scrolls. */
-    <div className="flex h-screen supports-[height:100dvh]:h-[100dvh] bg-paper overflow-hidden">
-      <Sidebar />
+    <div className="flex flex-col h-screen supports-[height:100dvh]:h-[100dvh] bg-paper overflow-hidden">
+      <TopBar />
       {navOpen && <MobileNavDrawer />}
 
-      <main className="flex-1 min-w-0 flex flex-col h-full overflow-hidden relative">
-        {/* Top Header */}
-        <header className="h-14 border-b border-rule bg-paper flex items-center justify-between gap-2 px-3 sm:px-6 shrink-0 z-10">
-          <div className="flex items-center gap-2 sm:gap-4 min-w-0">
-            {/* Mobile: the drawer handle, and the section name the icon rail
-                used to carry. Without it a phone has no "where am I". */}
-            <button
-              onClick={() => setNavOpen(true)}
-              aria-label="open navigation"
-              className="md:hidden -ml-1 p-2 rounded-input text-muted active:bg-paper3 transition-colors shrink-0"
-            >
-              <Menu size={20} />
-            </button>
-            <span data-tutorial="nav-clips" className="md:hidden font-display lowercase text-base text-ink truncate">
-              {activeNav?.label || 'openshorts'}
-            </span>
-            {status !== 'idle' && (
-              <button
-                onClick={handleReset}
-                className="btn-quiet px-3 py-1.5 text-xs shrink-0"
-                aria-label="New Project"
-              >
-                <Plus size={14} />
-                <span className="hidden sm:inline">New Project</span>
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
-            {userProfiles.length > 0 && (
-              <UserProfileSelector
-                profiles={userProfiles}
-                selectedUserId={uploadUserId}
-                onSelect={setUploadUserId}
-                onConnect={isManaged ? handleConnectSocials : undefined}
-              />
-            )}
-
-            {/* Cloud: minutes meter + account/sign-in. For free users the meter
-                opens the upgrade modal — otherwise the only path to a plan is
-                failing against the quota wall. */}
-            {billingEnabled && isManaged && (
-              <UsageMeter onClick={() => {
-                if (plan === 'free') openUpsell({ source: 'meter' });
-                else { window.location.hash = '#/account'; }
-              }} />
-            )}
-            {billingEnabled && isSignedIn && !isManaged && (
-              <button onClick={() => setShowPlanChoice(true)}
-                className="btn-primary px-4 py-2 text-xs">
-                Choose a plan
-              </button>
-            )}
-            {billingEnabled && !isSignedIn && (
-              <button onClick={() => setShowLogin(true)}
-                className="btn-ghost px-4 py-2 text-xs">
-                Sign in
-              </button>
-            )}
-            {billingEnabled && isSignedIn && <ProfileMenu onUpgrade={isManaged ? openUpsell : null} />}
-
-            {/* Hidden below sm: the standing banner underneath already says the
-                same thing, and two warnings in a 360px header is just noise. */}
-            {keysMissing && (
-              <button
-                onClick={() => (billingEnabled && !isSignedIn ? setShowLogin(true) : goToTab('settings'))}
-                className="badge-warn hover:brightness-125 transition-all hidden sm:inline-flex"
-                title="Configure API keys or choose a plan"
-              >
-                <AlertTriangle size={12} />
-                <span className="hidden md:inline">
-                  {!geminiOk ? 'Gemini API Key Missing' : 'Moment picker not configured'}
-                </span>
-                <span className="md:hidden">keys missing</span>
-              </button>
-            )}
-          </div>
-        </header>
+      <main className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden relative">
 
         {/* Persistent Missing Keys Banner — visible on every screen */}
         {keysMissing && activeTab !== 'settings' && (
@@ -1730,6 +1682,15 @@ function App() {
 
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
+
+          {/* View: Home */}
+          {activeTab === 'home' && (
+            <HomeDashboard
+              onStartClip={(url) => { setActiveTab('dashboard'); handleProcess({ type: 'url', payload: url }); }}
+              onOpenGallery={() => setActiveTab('gallery')}
+              onOpenClips={() => setActiveTab('dashboard')}
+            />
+          )}
 
           {/* View: Settings */}
           {activeTab === 'settings' && (
@@ -1966,11 +1927,6 @@ function App() {
             </div>
           )}
 
-          {/* View: SaaS Shorts */}
-          {activeTab === 'saasshorts' && (
-            <SaaShortsTab geminiApiKey={apiKey} elevenLabsKey={elevenLabsKey} falKey={falKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} managed={isManaged} />
-          )}
-
           {/* View: AI Agent */}
           {activeTab === 'ai-agent' && (
             <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
@@ -2085,75 +2041,6 @@ function App() {
 
               </div>
             </div>
-          )}
-
-          {/* View: UGC Gallery */}
-          {activeTab === 'ugc-gallery' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
-                <UGCGallery />
-              </div>
-            </div>
-          )}
-
-          {/* View: Autopilot */}
-          {activeTab === 'autopilot' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
-                {isSignedIn ? (
-                  <AutopilotTab
-                    onOpenProject={restoreProject}
-                    onUpgrade={() => (isManaged ? openUpsell({ source: 'autopilot' }) : setShowPlanChoice(true))}
-                    justConnected={autopilotConnected}
-                  />
-                ) : (
-                  <div className="max-w-2xl mx-auto card p-8 text-center">
-                    <Rocket size={28} className="mx-auto mb-4 text-brass" />
-                    <h1 className="font-display lowercase text-2xl text-ink mb-2">your channel, clipped on its own</h1>
-                    <p className="text-muted text-sm mb-6">
-                      Connect your YouTube channel and every new video turns into shorts automatically.
-                      Sign in to set it up.
-                    </p>
-                    <button onClick={() => setShowLogin(true)} className="btn-primary">sign in</button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* View: History */}
-          {activeTab === 'history' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
-              <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
-                {billingEnabled && !isSignedIn ? (
-                  <div className="max-w-2xl mx-auto card p-8 text-center">
-                    <History size={28} className="mx-auto mb-4 text-brass" />
-                    <h1 className="font-display lowercase text-2xl text-ink mb-2">your clips are saved to your account</h1>
-                    <p className="text-muted text-sm mb-6">
-                      Sign in with the email address you used to create them and they open right here.
-                    </p>
-                    <button onClick={() => setShowLogin(true)} className="btn-primary">sign in</button>
-                  </div>
-                ) : (
-                  <HistoryTab onReopenProject={restoreProject} />
-                )}
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'thumbnails' && (
-            <ThumbnailStudio
-              geminiApiKey={apiKey}
-              uploadPostKey={uploadPostKey}
-              uploadUserId={uploadUserId}
-              managed={isManaged}
-              onCreateClips={(sessionId) => {
-                setActiveTab('dashboard');
-                // The Studio source is the user's own upload, published to their
-                // own channel; the handover carries that same attestation.
-                handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
-              }}
-            />
           )}
 
           {/* View: Clip Gallery — every clip this instance has rendered */}
@@ -2281,21 +2168,14 @@ function App() {
                   </div>
                 )}
 
-                {/* Video Preview */}
-                {processingMedia && (
-                  <ProcessingAnimation
-                    media={processingMedia}
-                    isComplete={status === 'complete'}
-                    syncedTime={syncedTime}
-                    isSyncedPlaying={isSyncedPlaying}
-                    syncTrigger={syncTrigger}
-                  />
-                )}
+                {/* No source player while a job runs: the download is a
+                    background step and watching the source playback told you
+                    nothing about progress. The status line and log tail below
+                    are the real answer. */}
 
-                {/* Phones only. The scan box drops its invented telemetry at
-                    this size and the log terminal below starts collapsed, so
+                {/* Phones only. The log terminal below starts collapsed, so
                     without this the screen would say nothing about what the job
-                    is actually doing. The log tail is the real answer. */}
+                    is actually doing. */}
                 {status === 'processing' && (
                   <div className="sm:hidden mb-3 flex items-start gap-2 text-xs text-ink2 min-w-0">
                     <Loader2 size={14} className="animate-spin text-brass shrink-0 mt-px" />

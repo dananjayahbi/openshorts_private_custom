@@ -63,10 +63,31 @@ and TransNetV2/YOLO are never resident together.
 | `.gitattributes` | new: keeps `bin/*` and `*.sh` LF so that cannot regress |
 | `Dockerfile` | new documented, **off by default** build arg `TORCH_CUDA_INDEX` (see "GPU driver" below) |
 | `render-service/Dockerfile` | pins `remotion`/`@remotion/bundler`/`@remotion/renderer` to 4.0.541 to match `remotion/package-lock.json`. Mixing 4.0.446 with 4.0.541 crashed the renderer with `export 'Interactive' was not found in 'remotion'`. |
-| `app.py` | `GET /api/gallery/clips` — a real disk-backed gallery (the S3 one was commented out) and `geminiEnvKey` in `/api/config` |
-| `dashboard/src/App.jsx` | Upload-Post is no longer a required key; new **Clip Gallery** tab |
+| `app.py` | `GET /api/gallery/clips` — a real disk-backed gallery (the S3 one was commented out), `GET /api/overview` for the home dashboard, and `geminiEnvKey` in `/api/config` |
+| `dashboard/src/App.jsx` | top-bar shell, six-tab nav, no source preview while processing |
+| `dashboard/src/components/HomeDashboard.jsx` | new home page: stats, quick start, machine panel, recent clips |
 | `dashboard/src/components/Gallery.jsx` | routes clip URLs through `getApiUrl` (media tokens) |
 | `dashboard/src/contexts/AuthContext.jsx` | exposes `geminiEnvKey` |
+| `dashboard/src/tokens.css`, `tailwind.config.js`, `index.css` | neutral night + ember-orange palette, squarer buttons |
+| `dashboard/src/main.jsx` | no landing route: `/` and `#app` both open the app |
+| deleted | `Landing.jsx`, `landing.css`, `SaaShortsTab`, `UGCGallery`, `AutopilotTab`, `ProcessingAnimation` |
+
+## What the app looks like now
+
+Dark neutral chrome, ember-orange accent, top nav (Home · Clip Generator ·
+Clip Gallery · AI Agent · YouTube Studio · Settings). The landing page, the
+AI Shorts tab, the UGC gallery, Autopilot, History and Pricing are gone —
+this is a single-user local tool, not a storefront.
+
+**No source playback while a job runs.** Pasting a URL used to embed the
+YouTube player and mirror playback while downloading. The log tail and status
+line are the only progress UI now.
+
+**Home** (`/api/overview`): clips and videos rendered on this machine, active
+jobs, library disk usage, GPU panel (VRAM, utilisation, temperature) and the
+last four clips. The GPU panel needs `nvidia-smi`; the container image does not
+include it, so it reads `—` there — a native install fills it in.
+
 
 ## No social integration required
 

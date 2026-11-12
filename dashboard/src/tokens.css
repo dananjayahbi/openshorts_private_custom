@@ -1,37 +1,37 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app
- * macrostructure: Marquee Hero (marketing) / Workbench (app) / Long Document (content)
- * nav: N9 edge-aligned · footer: Ft5 statement · enrichment: filament apparatus (landing only)
- * pre-emit critique: P5 H4 E4 S5 R5 V4
+/* Hallmark · genre: workbench · theme: forge (neutral night + ember orange)
+ * design-system: design.md · designed-as-app
+ * macrostructure: Workbench (app) / Long Document (content)
+ * nav: T1 top rail · footer: Ft5 statement
  */
 
 :root {
-  /* paper */
-  --color-paper: oklch(13% 0.014 265);
-  --color-paper-2: oklch(16.5% 0.015 265);
-  --color-paper-3: oklch(20% 0.016 265);
+  /* paper — neutral, no blue cast (StoryFlow-style app chrome) */
+  --color-paper: oklch(14.5% 0.004 264);
+  --color-paper-2: oklch(17.5% 0.005 264);
+  --color-paper-3: oklch(21% 0.007 264);
 
   /* ink */
-  --color-ink: oklch(96% 0.006 262);
-  --color-ink-2: oklch(86% 0.01 262);
-  --color-muted: oklch(64% 0.012 262);
+  --color-ink: oklch(94% 0.004 264);
+  --color-ink-2: oklch(85% 0.006 264);
+  --color-muted: oklch(67% 0.012 264);
 
   /* rules */
-  --color-rule: oklch(96% 0.006 262 / 0.08);
-  --color-rule-2: oklch(96% 0.006 262 / 0.14);
-  --rule-blueprint: oklch(96% 0.006 262 / 0.04);
+  --color-rule: oklch(94% 0.004 264 / 0.09);
+  --color-rule-2: oklch(94% 0.004 264 / 0.16);
+  --rule-blueprint: oklch(94% 0.004 264 / 0.045);
 
-  /* accents */
-  --color-accent: oklch(76% 0.17 50);
-  --color-accent-ink: oklch(17% 0.03 50);
-  --color-accent-2: oklch(68% 0.16 18);
-  --color-glow: oklch(80% 0.16 50 / 0.42);
-  --color-paper-emit: oklch(76% 0.17 50 / 0.04);
-  --color-focus: oklch(76% 0.17 50);
+  /* accents — ember orange */
+  --color-accent: oklch(72% 0.19 47);
+  --color-accent-ink: oklch(18% 0.03 47);
+  --color-accent-2: oklch(64% 0.19 32);
+  --color-glow: oklch(76% 0.17 47 / 0.42);
+  --color-paper-emit: oklch(72% 0.19 47 / 0.045);
+  --color-focus: oklch(72% 0.19 47);
 
   /* states */
-  --color-ok: oklch(75% 0.11 150);
-  --color-danger: oklch(66% 0.18 25);
-  --color-warn: oklch(78% 0.14 75);
+  --color-ok: oklch(75% 0.14 155);
+  --color-danger: oklch(65% 0.19 25);
+  --color-warn: oklch(80% 0.14 78);
 
   /* type */
   --font-display: "Instrument Serif", ui-serif, Georgia, serif;
@@ -41,9 +41,9 @@
   --tracking-display: -0.032em;
   --tracking-micro: 0.10em;
 
-  /* geometry */
+  /* geometry — squarer than the old pill system, closer to a desktop tool */
   --radius-card: 10px;
-  --radius-input: 8px;
+  --radius-input: 7px;
 
   /* motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
