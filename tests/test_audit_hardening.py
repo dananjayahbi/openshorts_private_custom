@@ -37,10 +37,15 @@ def _post_process(body):
 def dirs(tmp_path, monkeypatch):
     out_root = tmp_path / "output"
     up_root = tmp_path / "uploads"
+    thumbs_root = tmp_path / "thumbnails"
     out_root.mkdir()
     up_root.mkdir()
+    thumbs_root.mkdir()
     monkeypatch.setattr(app_module, "OUTPUT_DIR", str(out_root))
     monkeypatch.setattr(app_module, "UPLOAD_DIR", str(up_root))
+    # Thumbnails live beside videos/ in Storage/, so patch them too or an
+    # endpoint test writes a session into the real media tree.
+    monkeypatch.setattr(app_module, "THUMBNAILS_DIR", str(thumbs_root))
     monkeypatch.setattr(app_module, "jobs", {})
     monkeypatch.setattr(app_module, "job_queue", asyncio.PriorityQueue())
     return out_root
