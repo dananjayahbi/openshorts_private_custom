@@ -1,6 +1,7 @@
 import os
 import llm_backend
 import platform_compat
+import storage
 import re
 import sys
 import uuid
@@ -41,10 +42,15 @@ from jsonfile import write_json_atomic
 load_dotenv()
 
 # Constants
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "output"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Everything the app stores lives under one Storage/ tree (see storage.py):
+# videos/<job_id>/ is served at /videos, thumbnails/ at /thumbnails, and
+# uploads/ holds the transient sources. Keeping the old names as aliases means
+# every existing os.path.join(OUTPUT_DIR, job_id, ...) still points at the
+# right place while the layout on disk is now a real media library.
+UPLOAD_DIR = storage.UPLOADS_DIR
+OUTPUT_DIR = storage.VIDEOS_DIR
+THUMBNAILS_DIR = storage.THUMBNAILS_DIR
+storage.ensure()
 
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
@@ -1407,8 +1413,9 @@ async def _follow_manifest_priorities() -> list:
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
     Backward-compat rescue:
-    If main.py accidentally wrote metadata/clips into OUTPUT_DIR root (e.g. output/<jobid>_...),
-    move them into output/<job_id>/ so the API can find and serve them.
+    If main.py accidentally wrote metadata/clips into OUTPUT_DIR root (e.g.
+    videos/<jobid>_...), move them into videos/<job_id>/ so the API can find
+    and serve them.
     """
     try:
         os.makedirs(job_output_dir, exist_ok=True)
@@ -2341,6 +2348,17 @@ def _register_resumed(picked) -> int:
     manifest. The heap orders them by submission time, whatever order the
     directory listing gave."""
     resumed = 0
+    # Copied once per scan, not once per manifest: this loop runs on the event
+    # loop, and a reviewing restart with thousands of manifests held the loop
+    # for hundreds of ms just copying os.environ (test_queue_saturation).
+    base_env = child_env()
+    budget_hit = False
+    if BILLING_ENABLED:
+        try:
+            from cloud import proxy_ledger as _pl
+            budget_hit = _pl.budget_exceeded_sync()
+        except Exception:
+            pass
     for job_id, m in picked:
         if job_id in jobs:
             continue  # registered while the disk was being read
@@ -2350,13 +2368,9 @@ def _register_resumed(picked) -> int:
         job_path = os.path.join(OUTPUT_DIR, job_id)
         # Rebuild env from scratch — the manifest holds no secrets. Managed
         # (cloud) jobs get the server key; self-host falls back to its env key.
-        env = child_env()
-        try:
-            from cloud import proxy_ledger as _pl
-            if BILLING_ENABLED and _pl.budget_exceeded_sync():
-                env.pop("PROXY_URL", None)  # daily paid-proxy budget hit
-        except Exception:
-            pass
+        env = dict(base_env)
+        if budget_hit:
+            env.pop("PROXY_URL", None)  # daily paid-proxy budget hit
         if BILLING_ENABLED and user_id is not None:
             try:
                 env["GEMINI_API_KEY"] = managed_keys.gemini_key()
@@ -2381,7 +2395,11 @@ def _register_resumed(picked) -> int:
         # Whatever a remote worker was doing for the instance that held this
         # job is void now: its next call is refused and it drops the job. A
         # job cut during its delivery keeps the clips it is delivering.
-        remote_worker.clear(job_path, purge=m.get("stage") != _DELIVERY_STAGE)
+        # Stat first: clear() lists the directory, and this loop runs on the
+        # event loop for every interrupted manifest (a restart with thousands
+        # held it for ~100 ms doing nothing).
+        if os.path.exists(os.path.join(job_path, remote_worker.CLAIM_FILE)):
+            remote_worker.clear(job_path, purge=m.get("stage") != _DELIVERY_STAGE)
         jobs[job_id] = {
             'status': 'queued',
             'logs': _TimedLog([f"♻️ Resuming your video after a server update (attempt {attempts})."]),
@@ -3802,9 +3820,9 @@ def _purge_local_jobs_for_user(user_id) -> int:
     Three stores, because each records ownership differently:
       - clip jobs: the ``.owner`` file every managed job writes, so jobs
         recovered from disk after a restart (no in-memory record) count too;
-      - SaaSShorts jobs (``output/saas_<id>``): ``saas_jobs`` only, no marker
+      - SaaSShorts jobs (``videos/saas_<id>``): ``saas_jobs`` only, no marker
         file, so a restart loses the link and those age out on the sweep;
-      - thumbnail sessions (``output/thumbnails/<id>`` plus the source video in
+      - thumbnail sessions (``thumbnails/<id>`` plus the source video in
         ``uploads/``): likewise in-memory only.
 
     Blocking: rmtree over gigabytes of video. Callers must run it in a thread.
@@ -4311,9 +4329,9 @@ app.mount("/videos", RestoringStaticFiles(
     authorize=lambda path, scope: _authorize_media("videos", path, scope),
     restorer=lambda job_id: _restore_for_public_path(job_id)), name="videos")
 
-# Mount static files for serving thumbnails
-THUMBNAILS_DIR = os.path.join(OUTPUT_DIR, "thumbnails")
-os.makedirs(THUMBNAILS_DIR, exist_ok=True)
+# Mount static files for serving thumbnails. They live beside videos/ in the
+# Storage tree, not inside it, so the job sweep can never mistake them for a
+# job directory.
 # Same allowlist as /videos: images only, never a session's scratch files.
 app.mount("/thumbnails", RestoringStaticFiles(
     directory=THUMBNAILS_DIR, guard=media_auth.is_servable,
@@ -5134,13 +5152,14 @@ async def get_overview():
     active = sum(1 for j in jobs.values()
                  if str(j.get("status") or "").lower() not in finished)
 
-    storage = {}
+    disk = {}
     try:
-        usage = shutil.disk_usage(OUTPUT_DIR)
-        storage = {
-            "usedGb": round(_dir_size(OUTPUT_DIR) / 1024 ** 3, 2),
+        usage = shutil.disk_usage(storage.STORAGE_DIR)
+        disk = {
+            "usedGb": round(_dir_size(storage.STORAGE_DIR) / 1024 ** 3, 2),
             "freeGb": round(usage.free / 1024 ** 3, 1),
             "totalGb": round(usage.total / 1024 ** 3, 1),
+            "path": os.path.abspath(storage.STORAGE_DIR),
         }
     except OSError:
         pass
@@ -5149,7 +5168,7 @@ async def get_overview():
         "videos": videos,
         "clips": clips,
         "activeJobs": active,
-        "storage": storage,
+        "storage": disk,
         "gpu": _gpu_snapshot(),
     }
 
@@ -9291,7 +9310,7 @@ async def thumbnail_generate(
             })
     # The session carries someone's transcript, titles and frames: only its
     # owner may generate from it (and be billed for it).
-    # The id becomes output/thumbnails/<id>: an unknown or malformed one
+    # The id becomes Storage/thumbnails/<id>: an unknown or malformed one
     # ("manual", "../x") gets a fresh id of its own instead of a shared folder.
     session_id = await _claim_thumbnail_session_id(request, session_id)
     _write_owner_marker(os.path.join(THUMBNAILS_DIR, session_id), await _owner_id(request))

@@ -4,6 +4,8 @@ import uuid
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import storage
+
 from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -265,7 +267,7 @@ def extract_face_frames(video_path, session_id, n=5, samples=40):
     import cv2
     from main import detect_face_candidates
 
-    out_dir = os.path.join("output", "thumbnails", session_id, "frames")
+    out_dir = os.path.join(storage.THUMBNAILS_DIR, session_id, "frames")
     os.makedirs(out_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(video_path)
@@ -661,7 +663,7 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
     Returns [{"url", "text", "why"}] (only the ones that rendered).
     """
     client = genai.Client(api_key=api_key)
-    output_dir = os.path.join("output", "thumbnails", session_id)
+    output_dir = os.path.join(storage.THUMBNAILS_DIR, session_id)
     os.makedirs(output_dir, exist_ok=True)
 
     # References travel as immutable byte parts: one PIL Image shared by the

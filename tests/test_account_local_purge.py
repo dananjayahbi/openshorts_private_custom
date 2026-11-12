@@ -26,14 +26,21 @@ def _write(path, body="x"):
 
 @pytest.fixture
 def workdir(tmp_path, monkeypatch):
-    """A throwaway output/ + uploads/ tree, with the in-memory stores emptied.
+    """A throwaway Storage tree, with the in-memory stores emptied.
 
-    app.py holds OUTPUT_DIR / UPLOAD_DIR as relative paths, so chdir is enough
-    to redirect every write the purge can make.
+    The three directories are patched on the app module rather than relying on
+    cwd: ``storage.py`` keeps them as relative paths, but the fixture must not
+    depend on where pytest runs.
     """
+    out = tmp_path / "output"
+    up = tmp_path / "uploads"
+    thumbs = tmp_path / "thumbnails"
+    for path in (out, up, thumbs):
+        path.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(tmp_path)
-    os.makedirs("output/thumbnails", exist_ok=True)
-    os.makedirs("uploads", exist_ok=True)
+    monkeypatch.setattr(app, "OUTPUT_DIR", str(out))
+    monkeypatch.setattr(app, "UPLOAD_DIR", str(up))
+    monkeypatch.setattr(app, "THUMBNAILS_DIR", str(thumbs))
     monkeypatch.setattr(app, "jobs", {})
     monkeypatch.setattr(app, "saas_jobs", {})
     monkeypatch.setattr(app, "thumbnail_sessions", {})
@@ -94,34 +101,34 @@ class TestOtherStores:
     def test_erases_generated_thumbnails_and_their_source(self, workdir):
         # Nothing else ever deletes these: the hourly sweep skips the whole
         # thumbnails directory, and they are served publicly at /thumbnails/.
-        _write("output/thumbnails/t1/thumb.png")
+        _write("thumbnails/t1/thumb.png")
         _write("uploads/thumb_t1_video.mp4")
         app.thumbnail_sessions["t1"] = {
             "user_id": MINE, "video_path": "uploads/thumb_t1_video.mp4"}
 
         app._purge_local_jobs_for_user(MINE)
 
-        assert not os.path.exists("output/thumbnails/t1")
+        assert not os.path.exists("thumbnails/t1")
         assert not os.path.exists("uploads/thumb_t1_video.mp4")
         assert "t1" not in app.thumbnail_sessions
 
     def test_leaves_another_users_thumbnails_alone(self, workdir):
-        _write("output/thumbnails/t2/thumb.png")
+        _write("thumbnails/t2/thumb.png")
         app.thumbnail_sessions["t2"] = {"user_id": THEIRS}
 
         app._purge_local_jobs_for_user(MINE)
 
-        assert os.path.exists("output/thumbnails/t2/thumb.png")
+        assert os.path.exists("thumbnails/t2/thumb.png")
 
     def test_keeps_the_thumbnails_directory_itself(self, workdir):
         # It backs a StaticFiles mount; removing it 500s every /thumbnails
         # request until the process restarts.
-        _write("output/thumbnails/t1/thumb.png")
+        _write("thumbnails/t1/thumb.png")
         app.thumbnail_sessions["t1"] = {"user_id": MINE}
 
         app._purge_local_jobs_for_user(MINE)
 
-        assert os.path.isdir("output/thumbnails")
+        assert os.path.isdir("thumbnails")
 
 
 class TestPathTraversal:

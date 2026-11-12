@@ -8,8 +8,9 @@ here, send every output file back, report the exit code. It holds no database,
 storage, proxy or cookie credential, only its own model key (GEMINI_API_KEY in
 its environment) and the worker token.
 
-Run it from the image's /app, so the relative paths of a job (``output/<id>``,
-``uploads/<file>``) are the ones the API host uses.
+Run it from the image's /app, so the relative paths of a job
+(``Storage/videos/<id>``, ``Storage/uploads/<file>``) are the ones the API host
+uses.
 """
 import json
 import os
@@ -17,6 +18,7 @@ import platform_compat
 import shutil
 import signal
 import socket
+import storage
 import subprocess
 import sys
 import threading
@@ -85,18 +87,33 @@ def valid_job_id(job_id):
         return False
 
 
+def _root_parts(path):
+    return tuple(os.path.normpath(path).replace("\\", "/").split("/"))
+
+
+# The API host names a job's source as a path relative to its storage root.
+# Both the current layout (Storage/videos, Storage/uploads) and the pre-Storage
+# one (output, uploads) are accepted so an API and a worker on different
+# versions can still pair.
+_JOB_ROOTS = {_root_parts(storage.VIDEOS_DIR), ("output",)}
+_UPLOAD_ROOTS = {_root_parts(storage.UPLOADS_DIR), ("uploads",)}
+
+
 def safe_job_path(job_id, path):
     """``path`` if it is the job's source location as the API host names it:
-    inside ``output/<job_id>/`` or ``uploads/``, no traversal. Else None."""
+    inside ``Storage/videos/<job_id>/`` or ``Storage/uploads/``, no traversal."""
     if not isinstance(path, str) or not path or path.startswith("/") or "\x00" in path:
         return None
     parts = path.replace("\\", "/").split("/")
     if any(p in ("", ".", "..") for p in parts):
         return None
-    if parts[:2] == ["output", job_id] and len(parts) == 3:
-        return os.path.join(*parts)
-    if parts[0] == "uploads" and len(parts) == 2:
-        return os.path.join(*parts)
+    for root in _JOB_ROOTS:
+        if (len(parts) == len(root) + 2 and tuple(parts[:len(root)]) == root
+                and parts[len(root)] == job_id):
+            return os.path.join(*parts)
+    for root in _UPLOAD_ROOTS:
+        if len(parts) == len(root) + 1 and tuple(parts[:len(root)]) == root:
+            return os.path.join(*parts)
     return None
 
 
@@ -196,7 +213,7 @@ class Uploader:
 def run_job(job_id, claim):
     if not valid_job_id(job_id):
         return
-    out_dir = os.path.join("output", job_id)
+    out_dir = os.path.join(storage.VIDEOS_DIR, job_id)
     source = None
     proc = None
     try:
@@ -213,6 +230,9 @@ def run_job(job_id, claim):
         source = safe_job_path(job_id, info.get("source"))
         if source is None:
             raise RuntimeError("source path refused")
+        # Keep the fetched source inside the job dir (it is what cleanup
+        # removes) while accepting either storage layout from the API host.
+        source = os.path.join(out_dir, os.path.basename(source))
         os.makedirs(out_dir, exist_ok=True)
         if int(info.get("source_size") or 0) > MAX_SOURCE_BYTES:
             raise RuntimeError("source too large for this worker")

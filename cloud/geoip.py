@@ -28,10 +28,12 @@ import asyncio
 import hashlib
 import ipaddress
 import os
+import platform_compat
 import re
 import tempfile
 import time
 
+import storage
 from .config import _flag
 
 DEFAULT_URL = "https://github.com/sapics/ip-location-db/releases/download/latest/user-country.mmdb"
@@ -60,7 +62,7 @@ def db_path() -> str:
     explicit = os.environ.get("GEOIP_COUNTRY_DB_PATH", "").strip()
     if explicit:
         return explicit
-    base = _state_dir or os.environ.get("OUTPUT_DIR", "output")
+    base = _state_dir or os.environ.get("OUTPUT_DIR", storage.VIDEOS_DIR)
     return os.path.join(base, ".geoip", "country.mmdb")
 
 
@@ -226,16 +228,13 @@ def refresh(now=None, fetch=None) -> bool:
 
 def _try_lock(path):
     try:
-        import fcntl
         fh = open(path, "a")
-    except (ImportError, OSError):
-        return False
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        fh.close()
-        return None
-    return fh
+        return False
+    if platform_compat.try_lock(fh):
+        return fh
+    fh.close()
+    return None
 
 
 async def _loop(wanted):

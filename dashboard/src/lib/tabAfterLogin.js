@@ -3,9 +3,11 @@
 // visitor is signed out, and AuthContext sends the fresh session to
 // #app?tab=<tab> instead of plain #app, which would open the Clip Generator
 // (and the first-run tutorial on a new device) with the clips nowhere in sight.
+// 'history' is kept for the links in emails already sent; the app maps it to
+// the Clip Gallery.
 const TAB_AFTER_LOGIN_KEY = 'os_tab_after_login';
 const TAB_AFTER_LOGIN_TTL_MS = 2 * 60 * 60 * 1000;
-const TABS = ['history', 'autopilot'];
+const TABS = ['history', 'gallery', 'autopilot'];
 
 // Any other tab clears it: a visitor who moved on to the generator signs in
 // from there and should stay there.

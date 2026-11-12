@@ -64,6 +64,7 @@ for the saturation mode when that is configured.
 import asyncio
 import json
 import os
+import platform_compat
 import time
 
 from . import queue_mode
@@ -519,23 +520,20 @@ def save_state(state: dict):
 
 
 def _try_lock():
-    """An exclusive non-blocking flock on the shared dir: the open file, None
+    """An exclusive non-blocking lock on the shared dir: the open file, None
     when the other instance holds it, False when locking is unavailable (no
-    dir, no fcntl), in which case the tick goes ahead unlocked."""
+    dir, no lock primitive), in which case the tick goes ahead unlocked."""
     p = _path(LOCK_FILE)
     if not p:
         return False
     try:
-        import fcntl
         fh = open(p, "a")
-    except (ImportError, OSError):
-        return False
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        fh.close()
-        return None
-    return fh
+        return False
+    if platform_compat.try_lock(fh):
+        return fh
+    fh.close()
+    return None
 
 
 # --- Saturation mode (cloud/queue_mode.py) ---------------------------------------

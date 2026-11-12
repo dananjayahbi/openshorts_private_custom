@@ -214,10 +214,10 @@ MEDIA_PREFIXES = ("/videos/", "/thumbnails/")
 def strip_media_prefix(url_path: str) -> Optional[str]:
     """``/videos/a/b.mp4`` -> ``videos-relative`` path, or None if not ours.
 
-    ``/thumbnails/<x>`` is mounted on ``output/thumbnails`` while ``/videos/<x>``
-    is mounted on ``output``, so the returned path is relative to whichever base
-    the caller's prefix names — the signature only has to be stable, not to
-    describe the filesystem.
+    ``/thumbnails/<x>`` is mounted on ``Storage/thumbnails`` while
+    ``/videos/<x>`` is mounted on ``Storage/videos``, so the returned path is
+    relative to whichever base the caller's prefix names — the signature only
+    has to be stable, not to describe the filesystem.
     """
     if not url_path:
         return None

@@ -44,7 +44,7 @@ services:
       - .:/app
       - ./.cache/huggingface:/app/.cache/huggingface
       - /app/__pycache__
-      - ./output:/app/output
+      - ./Storage:/app/Storage
 
   frontend:
     ports: !override

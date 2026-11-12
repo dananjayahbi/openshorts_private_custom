@@ -61,6 +61,16 @@ $logDir = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # --- environment -----------------------------------------------------------
+# One Storage/ tree holds every video, thumbnail and upload (storage.py). The
+# API keeps the relative path (so a remote worker sees the same layout); the
+# renderer needs it absolute because its cwd is render-service/.
+$storageRoot = Join-Path $root 'Storage'
+foreach ($sub in @('videos', 'thumbnails', 'uploads')) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $storageRoot $sub) | Out-Null
+}
+# To keep the clips on another disk, export OPENSHORTS_STORAGE (absolute) in
+# the shell BEFORE this script and point OUTPUT_DIR at its videos/ folder here.
+
 $env:HF_HOME = Join-Path $root '.cache\huggingface'
 $env:HF_HUB_DISABLE_XET = '1'
 $env:PYTORCH_CUDA_ALLOC_CONF = 'expandable_segments:True'
@@ -72,7 +82,7 @@ $env:FONTCONFIG_FILE = Join-Path $root 'fonts\fonts.local.conf'
 
 $env:PORT = "$renderPort"
 $env:REMOTION_BUNDLE_PATH = Join-Path $root 'remotion'
-$env:OUTPUT_DIR = Join-Path $root 'output'
+$env:OUTPUT_DIR = Join-Path $storageRoot 'videos'
 
 $env:VITE_PROXY_TARGET = "http://localhost:$apiPort"
 $env:VITE_RENDER_TARGET = "http://localhost:$renderPort"

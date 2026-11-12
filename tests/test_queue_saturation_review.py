@@ -350,9 +350,9 @@ class Busy:
     """Holds the queue watch's lock like the other container would."""
 
     def __init__(self, d):
-        import fcntl
+        import platform_compat
         self.fh = open(os.path.join(d, qw.LOCK_FILE), "a")
-        fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert platform_compat.try_lock(self.fh), "the lock should be free"
 
     def release(self):
         self.fh.close()

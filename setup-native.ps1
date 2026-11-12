@@ -20,6 +20,13 @@ Set-Location $root
 $python = Join-Path $Venv 'Scripts\python.exe'
 $cache = if ($env:PIP_CACHE_DIR) { $env:PIP_CACHE_DIR } else { 'F:\pip-cache' }
 
+# The local CDN: one tree for every clip, thumbnail and upload (storage.py).
+$storageRoot = if ($env:OPENSHORTS_STORAGE) { $env:OPENSHORTS_STORAGE } else { Join-Path $root 'Storage' }
+foreach ($sub in @('videos', 'thumbnails', 'uploads')) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $storageRoot $sub) | Out-Null
+}
+Write-Host "media root: $storageRoot" -ForegroundColor DarkGray
+
 Write-Host "== 1/6 python venv ($Venv)" -ForegroundColor Cyan
 if (-not (Test-Path $python)) {
     if (-not (Get-Command py -ErrorAction SilentlyContinue)) { throw "Python launcher 'py' not found." }

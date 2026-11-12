@@ -1,11 +1,18 @@
-"""NVENC encode slots: bin/ffmpeg caps how many job encodes share the card."""
-import fcntl
+"""NVENC encode slots: bin/ffmpeg caps how many job encodes share the card.
+
+The cap is a POSIX shell wrapper using ``flock``; the native Windows run uses
+ffmpeg.exe directly and caps nothing (four concurrent NVENC sessions were
+verified on this card), so this module is skipped where the primitives are
+missing instead of failing collection.
+"""
 import os
 import shutil
 import subprocess
 import time
 
 import pytest
+
+fcntl = pytest.importorskip("fcntl", reason="bin/ffmpeg is a POSIX shell wrapper")
 
 WRAPPER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "bin", "ffmpeg")

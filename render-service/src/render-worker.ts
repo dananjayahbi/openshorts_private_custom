@@ -53,7 +53,7 @@ export async function executeRender(params: RenderParams): Promise<void> {
     // Determine output directory and file path
     const outputDir = process.env.OUTPUT_DIR
       ? path.resolve(process.env.OUTPUT_DIR)
-      : path.resolve(import.meta.dirname, "../../output");
+      : path.resolve(import.meta.dirname, "../../Storage/videos");
 
     const jobOutputDir = path.join(outputDir, jobId);
     fs.mkdirSync(jobOutputDir, { recursive: true });

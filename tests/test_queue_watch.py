@@ -228,10 +228,10 @@ def test_new_instance_continues_the_incident(world):
 
 
 def test_other_instance_holding_the_lock_skips(world):
-    import fcntl
+    import platform_compat
     world.add(1, paid=True, since=T0 - 12 * MIN)
     with open(f"{world.dir}/{qw.LOCK_FILE}", "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        assert platform_compat.try_lock(fh)
         assert tick(T0) is None
     assert tick(T0 + 3 * MIN) == "alert"
 

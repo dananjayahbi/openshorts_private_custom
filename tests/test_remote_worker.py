@@ -832,7 +832,10 @@ def test_end_to_end_with_the_real_worker(api, monkeypatch, tmp_path):
     assert not m._remote_jobs and job_id not in m._running_jobs
     assert m.concurrency_semaphore._value == 2
     assert not rw.is_remote(d)
-    assert os.listdir(str(host / "output")) == []          # the worker kept nothing
+    # The worker keeps nothing: its copy of the job lands in Storage/videos/<id>
+    # (worker.py) and is removed once the files are back.
+    kept = host / "Storage" / "videos"
+    assert os.listdir(str(kept)) == []
 
 
 def test_worker_lines_cannot_set_this_hosts_markers(api):

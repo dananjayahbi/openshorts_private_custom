@@ -46,7 +46,7 @@ def test_transient_failures_keep_polling_until_the_ceiling():
 
 
 def test_app_ends_the_poll_and_drops_the_saved_session():
-    src = open(APP).read()
+    src = open(APP, encoding="utf-8").read()
     poll = src[src.index("const pollJob"):src.index("function App()")]
     assert "throw new JobPollError(res.status)" in poll
     effect = src[src.index("pollFailureAction(e, failures)") - 400:

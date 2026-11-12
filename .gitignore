@@ -18,6 +18,8 @@ uploads/
 downloads/
 videos/
 output/
+# Local CDN: every generated clip, thumbnail and upload (storage.py)
+Storage/
 
 # OS / IDE
 .DS_Store

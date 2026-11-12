@@ -7,10 +7,16 @@ changed, why, and how to run it.
 
 ```powershell
 .\setup-native.ps1            # once: venv on F:, torch cu128, npm deps, fonts
-.\start-native.ps1            # api + renderer + dashboard, opens the UI
-.\start-native.ps1 -Stop      # stop all three
-.\start-native.ps1 -Restart   # stop, then start
+.\start.bat                   # one visible CMD window per service + browser
+.\stop.bat                    # stop all three
+.\start-native.ps1            # same three services, hidden windows, logs in logs\
+.\start-native.ps1 -Stop
 ```
+
+`start.bat` is the interactive launcher: it opens **API**, **Renderer** and
+**Dashboard** in separate CMD windows so each keeps streaming its own log, and
+opens the dashboard once Vite answers. `start-native.ps1` is the headless
+equivalent (hidden windows, output in `logs\`), useful for automation.
 
 | Service | URL |
 |---|---|
@@ -18,15 +24,48 @@ changed, why, and how to run it.
 | API | http://localhost:18480 (`/docs`, `/health/ready`) |
 | Renderer (Remotion) | http://localhost:18482 |
 
-Logs land in `logs\api.log`, `logs\dashboard.log`, `logs\renderer.log`.
+Logs land in `logs\api.log`, `logs\dashboard.log`, `logs\renderer.log` when
+started with `start-native.ps1`.
 
 The venv lives **outside the repo** (`F:\openshorts-venv`, override with
 `OPENSHORTS_VENV`) so the repo drive keeps its free space for rendered clips.
 The pip cache is `F:\pip-cache`. Both are deliberately off the E: volume.
 
+## Storage — the local CDN
+
+Every video, thumbnail and upload lives under one tree at the repo root
+(`storage.py`), so the library can be inspected, backed up or moved as a unit:
+
+```
+Storage/
+  videos/<job_id>/...        clips, sources, metadata   -> /videos/<job_id>/...
+  thumbnails/<session_id>/...                           -> /thumbnails/...
+  uploads/                   transient sources (not served)
+```
+
+- `OUTPUT_DIR` is `Storage/videos`, `UPLOAD_DIR` is `Storage/uploads`,
+  `THUMBNAILS_DIR` is `Storage/thumbnails`. The names survive on purpose: every
+  `os.path.join(OUTPUT_DIR, job_id, ...)` in the pipeline keeps working, the URL
+  mounts (`/videos`, `/thumbnails`) are unchanged, and the retention sweeps
+  (`OUTPUT_MAX_GB`, `UPLOADS_MAX_GB`) now measure the new tree.
+- The dashboard home page reports the size of the whole `Storage/` tree and the
+  free space on its volume.
+- **Move it to another disk** by setting `OPENSHORTS_STORAGE` to an absolute
+  path before starting (both launchers create `videos/`, `thumbnails/`,
+  `uploads/`):
+  ```powershell
+  $env:OPENSHORTS_STORAGE = 'F:\OpenShorts-Storage'
+  .\start.bat
+  ```
+  Set it in the same shell for `start-native.ps1`; it passes the absolute
+  `Storage\videos` to the renderer automatically.
+- The folder is git-ignored. The old `output/` and `uploads/` trees were
+  removed when this layout landed.
+
 ### What made native possible
 
-Seven POSIX-only spots, all sealed in `platform_compat.py`:
+Five POSIX-only behaviours (seven call sites), all sealed in
+`platform_compat.py`:
 
 | Was | Now |
 |---|---|
@@ -58,6 +97,18 @@ Other differences and how they are handled:
 - **Remotion**: `render-service/package.json` pins the three Remotion packages
   to `4.0.541` (matching `remotion/package-lock.json`) and adds
   `react`/`react-dom` 18.3.1, which `@remotion/renderer` needs as peers.
+
+## Tests
+
+```powershell
+F:\openshorts-venv\Scripts\python.exe -m pytest -q
+```
+
+`pytest` and the cloud-mode imports (`requirements-billing.txt`, needed only to
+collect those tests) are installed in the venv alongside the pipeline. The
+suite passes natively on Windows (2029 passed, 14 skipped); the skips are the
+POSIX-only ones: the `bin/ffmpeg` flock wrapper, POSIX file modes, and the
+`flock`-based multi-instance simulations.
 
 ### Measured on this machine (native, 13 Nov 2026)
 
@@ -250,8 +301,8 @@ uploaded by hand. The Settings field stays for when you want it back.
 
 ## Clip Gallery
 
-`GET /api/gallery/clips?limit=&offset=` scans `output/<job_id>/`, reads each
-job's `*_metadata.json` and returns every clip that really rendered:
+`GET /api/gallery/clips?limit=&offset=` scans `Storage/videos/<job_id>/`, reads
+each job's `*_metadata.json` and returns every clip that really rendered:
 
 - newest job first, clips in metadata order
 - the file served is the **captioned** copy when the job made one (newest
@@ -261,26 +312,19 @@ job's `*_metadata.json` and returns every clip that really rendered:
   results use
 - in cloud mode it filters by the job's `.owner` sidecar
 
-Clips live in `output/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days) and are
-trimmed oldest-first once `OUTPUT_MAX_GB` is reached. A permanent library would
-need its own volume — say the word and I will move the clips out of the working
-directory into one.
+Clips live in `Storage/videos/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days)
+and are trimmed oldest-first once `OUTPUT_MAX_GB` is reached. To keep them on
+another disk, set `OPENSHORTS_STORAGE` (see **Storage** above) instead of
+moving the working directory.
 
-## GPU driver (open item)
+## GPU driver (resolved)
 
-`nvidia-smi` reports driver **566.36 = CUDA 12.7**. The image's torch is
-**cu130** (requires driver 580+), so today TransNetV2 and YOLO silently fall
-back to the CPU:
-
-```
-CUDA initialization: The NVIDIA driver on your system is too old (found version 12070)
-```
-
-Everything else is already on the GPU (whisper, NVENC, CUDA decode). Fix:
-update the driver in the NVIDIA app (`Drivers → Check for updates`) and reboot.
-
-The alternative — `TORCH_CUDA_INDEX=cu128` as a build arg — costs ~2.3 GB of
-duplicate CUDA 12.8 libraries, so it is left switched off.
+`nvidia-smi` reports driver **566.36 = CUDA 12.7**, which is why the native run
+uses the **cu128** torch wheel instead of the image's cu130 one. Verified on
+this machine: `torch.cuda.is_available() == True`, device capability `(7, 5)`,
+whisper large-v3-turbo on CUDA, TransNetV2 and YOLO on the GPU, NVENC encoding.
+No driver update is needed. (The cost is ~2.3 GB of CUDA 12.8 libraries in the
+venv, which lives on F:.)
 
 ## Model weights on disk
 

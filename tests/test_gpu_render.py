@@ -141,25 +141,24 @@ def test_render_timeout_falls_back(monkeypatch, tmp_path):
 
 
 def test_nvenc_slot_takes_a_free_lock(monkeypatch, tmp_path):
-    import fcntl
+    import platform_compat
     monkeypatch.setenv("NVENC_SLOTS", "2")
     monkeypatch.setenv("NVENC_LOCK_DIR", str(tmp_path))
     busy = open(tmp_path / ".nvenc-0.lock", "a")
-    fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert platform_compat.try_lock(busy)
     with gpu_render.nvenc_slot():
         probe = open(tmp_path / ".nvenc-1.lock", "a")
-        with pytest.raises(OSError):
-            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not platform_compat.try_lock(probe)
         probe.close()
     probe = open(tmp_path / ".nvenc-1.lock", "a")
-    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released after the block
+    assert platform_compat.try_lock(probe)  # released after the block
     probe.close()
     busy.close()
 
 
 def test_nvenc_slot_wait_goes_to_the_job_log(monkeypatch, tmp_path):
     """Same line as bin/ffmpeg: seconds waited, for the job's JOB_CPU."""
-    import fcntl
+    import platform_compat
     import threading
     locks = tmp_path / "locks"
     locks.mkdir()
@@ -171,7 +170,7 @@ def test_nvenc_slot_wait_goes_to_the_job_log(monkeypatch, tmp_path):
         pass
     assert not log.exists()                      # no wait, no line
     busy = open(locks / ".nvenc-0.lock", "a")
-    fcntl.flock(busy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert platform_compat.try_lock(busy)
     threading.Timer(1.5, busy.close).start()
     with gpu_render.nvenc_slot():
         pass

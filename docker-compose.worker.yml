@@ -23,8 +23,7 @@ services:
       FFMPEG_THREADS: ${FFMPEG_THREADS:-2}
       JOB_NICE: ${JOB_NICE:-10}
     volumes:
-      - worker_output:/app/output
-      - worker_uploads:/app/uploads
+      - worker_storage:/app/Storage
       - worker_models:/app/.cache
     tmpfs:
       - /tmp:size=4g
@@ -39,8 +38,7 @@ services:
     networks: [worker]
 
 volumes:
-  worker_output:
-  worker_uploads:
+  worker_storage:
   worker_models:
 
 networks:

@@ -25,9 +25,16 @@ import asyncio
 import json
 import os
 import sys
+import threading
 
 # Must happen before importing app: import-time prints would land on stdout.
 _PROTOCOL_OUT = sys.stdout
+# JSON-RPC is UTF-8 by definition. Without this, Windows picks the ANSI code
+# page (cp1252) and a non-ASCII tool description breaks the stream.
+try:
+    _PROTOCOL_OUT.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 sys.stdout = sys.stderr
 
 from starlette.requests import Request  # noqa: E402
@@ -79,13 +86,34 @@ def _write(response: dict) -> None:
 
 
 async def _stdin_lines():
-    """Yield stdin lines without blocking the loop (tool calls run for minutes)."""
+    """Yield stdin lines without blocking the loop (tool calls run for minutes).
+
+    A plain thread feeds an asyncio queue instead of
+    ``loop.connect_read_pipe``: Windows' ProactorEventLoop fails to register a
+    piped stdin ("The handle is invalid"), which made every MCP stdio client
+    on Windows hang. Reading in a daemon thread is portable, and EOF still
+    ends the generator.
+    """
     loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    queue: asyncio.Queue = asyncio.Queue()
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+
+    def reader():
+        try:
+            for line in stream:
+                loop.call_soon_threadsafe(queue.put_nowait, line)
+        except Exception:
+            pass
+        finally:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except RuntimeError:      # the loop is already closed
+                pass
+
+    threading.Thread(target=reader, name="mcp-stdin", daemon=True).start()
     while True:
-        line = await reader.readline()
-        if not line:  # EOF: the host closed the pipe
+        line = await queue.get()
+        if line is None:  # EOF: the host closed the pipe
             return
         yield line
 

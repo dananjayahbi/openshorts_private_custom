@@ -987,19 +987,22 @@ function App() {
     if (tutorialLock && activeTab !== 'dashboard') setActiveTab('dashboard');
   }, [tutorialLock, activeTab]);
 
-  // Deep links into a tab: #app?tab=autopilot (Autopilot emails, the social
-  // connect page's return URL). Read once per hash change, then the query is
-  // dropped so a reload does not keep forcing the tab.
+  // Deep links into a tab: #app?tab=history (the clips-ready email, an old
+  // link that now means the Clip Gallery), #app?tab=autopilot (Autopilot
+  // emails, the social connect page's return URL). Read once per hash change,
+  // then the query is dropped so a reload does not keep forcing the tab.
   const [autopilotConnected, setAutopilotConnected] = useState(null); // connect outcome, see lib/connectReturn.js
   useEffect(() => {
-    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'ai-agent'];
+    // 'history' is the pre-redesign name of the Clip Gallery: emails already
+    // sent still point at it, so it is accepted and mapped, not ignored.
+    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'ai-agent', 'history'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
       const params = new URLSearchParams(hash.slice(5));
       const tab = params.get('tab');
       if (!tab || !DEEP_LINK_TABS.includes(tab)) return;  // e.g. #app?tutorial=1
-      setActiveTab(tab);
+      setActiveTab(tab === 'history' ? 'gallery' : tab);
       // The connect outcome rides in the query string, not in the hash
       // (lib/connectReturn.js): a cancel also comes back with connected=1.
       if (tab === 'autopilot' && params.get('connected') === '1') {

@@ -319,7 +319,9 @@ def append_log(job_dir, lines):
         room -= cost
         clean.append(text)
     if clean:
-        with open(path, "a", encoding="utf-8") as f:
+        # newline="": Windows text mode would rewrite each \n as \r\n, and the
+        # reader splits on bytes looking for \n (remote_worker.read_log).
+        with open(path, "a", encoding="utf-8", newline="") as f:
             f.write("\n".join(clean) + "\n")
     touch_seen(job_dir)
     return len(clean)
@@ -338,7 +340,10 @@ def read_log(job_dir, offset):
     if end < 0:
         return [], offset
     lines = data[:end].decode("utf-8", "replace").split("\n")
-    return [line for line in lines if line], offset + end + 1
+    # A log written before the newline="" fix (or by any other writer on
+    # Windows) carries \r before each \n: the byte offset stays correct, the
+    # line the UI shows should not end in a carriage return.
+    return [line.rstrip("\r") for line in lines if line.rstrip("\r")], offset + end + 1
 
 
 def mark_done(job_dir, returncode):

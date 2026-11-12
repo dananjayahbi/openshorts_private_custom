@@ -7,7 +7,7 @@ services:
     volumes:
       - .:/app
       - /app/__pycache__
-      - ./output:/app/output
+      - ./Storage:/app/Storage
     restart: unless-stopped
 
   frontend:
@@ -32,10 +32,10 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - ./output:/output
+      - ./Storage:/app/Storage
     environment:
       - REMOTION_BUNDLE_PATH=/app/remotion
-      - OUTPUT_DIR=/output
+      - OUTPUT_DIR=/app/Storage/videos
       - PORT=3100
     restart: unless-stopped
     depends_on:

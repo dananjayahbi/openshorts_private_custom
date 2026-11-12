@@ -75,7 +75,7 @@ def test_history_deep_link_survives_sign_in():
     """The dashboard side of the same link: signed out, History asks to sign in
     and the sign-in comes back to History, not to the generator/tutorial."""
     def read(path):
-        with open(os.path.join(REPO, "dashboard/src", path)) as f:
+        with open(os.path.join(REPO, "dashboard/src", path), encoding="utf-8") as f:
             return f.read()
 
     app_jsx = read("App.jsx")

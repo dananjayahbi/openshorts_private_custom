@@ -30,6 +30,7 @@ import platform_compat
 import re
 import subprocess
 import sys
+import storage
 import tempfile
 import threading
 import time
@@ -62,7 +63,7 @@ _ASR_GATE = threading.Semaphore(_ASR_SLOTS)
 # main.py job is its own process, so eight jobs could all load Parakeet at
 # once. Peak per transcription is ~4-6 GB on a 20 GB card (prod, 22-sep-2026).
 ASR_HOST_SLOTS = int(os.environ.get("ASR_HOST_SLOTS", "2"))
-ASR_LOCK_DIR = os.environ.get("ASR_LOCK_DIR", "output")
+ASR_LOCK_DIR = os.environ.get("ASR_LOCK_DIR", storage.VIDEOS_DIR)
 # Seconds this process waited for a host slot (main.py reports it in JOB_CPU).
 ASR_WAIT = {"s": 0.0}
 

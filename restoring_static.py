@@ -65,7 +65,11 @@ class RestoringStaticFiles(StaticFiles):
         except HTTPException as exc:
             if exc.status_code != 404 or self.restorer is None:
                 raise
-            job_id = path.split("/", 1)[0] if "/" in path else ""
+            # Starlette joins the mount path with os.sep, so on Windows ``path``
+            # arrives as ``<job_id>\\<file>``: split on both separators or the
+            # restorer is never asked (and an archived job stays a 404).
+            rel = path.replace("\\", "/")
+            job_id = rel.split("/", 1)[0] if "/" in rel else ""
             if not job_id:
                 raise
             try:

@@ -45,9 +45,12 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
-const OUTPUT_DIR = process.env.OUTPUT_DIR || "/output";
+// Set by the launcher to <repo>/Storage/videos. The fallback keeps `npm start`
+// usable from render-service/ without any environment.
+const OUTPUT_DIR = process.env.OUTPUT_DIR || "../Storage/videos";
 
-// Serve video files from the shared output volume so Remotion can access them via HTTP
+// Serve the job folders over HTTP: Remotion's Chromium cannot read the host
+// filesystem paths the API passes it, but it can fetch them from here.
 app.use("/output", express.static(OUTPUT_DIR));
 
 // Health check
@@ -84,8 +87,8 @@ app.post("/render", (req, res) => {
     `[render] Queued render ${renderId} for job=${jobId} clip=${clipIndex}`
   );
 
-  // Resolve video URL: convert frontend/backend URLs to renderer's own static server
-  // The renderer serves /output/* from the shared Docker volume
+  // Resolve video URL: the API hands out an absolute host path, the renderer
+  // re-serves the same file from its own /output mount.
   let resolvedVideoUrl = props.videoUrl;
   const videoPathMatch = props.videoUrl.match(/\/videos\/([^/]+)\/(.+)$/);
   if (videoPathMatch) {
