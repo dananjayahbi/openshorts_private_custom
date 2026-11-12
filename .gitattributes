@@ -1,0 +1,12 @@
+# Keep the runtime shell scripts LF. The container runs bin/ffmpeg as a
+# /bin/sh script; a CRLF checkout makes the kernel look for "/bin/sh\r" and
+# every ffmpeg call fails with "no such file or directory" (Windows + Docker).
+bin/* text eol=lf
+*.sh text eol=lf
+
+# Binary assets must never be normalised.
+*.ttf binary
+*.gif binary
+*.png binary
+*.jpg binary
+*.mp4 binary

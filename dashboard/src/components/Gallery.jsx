@@ -26,7 +26,7 @@ export default function Gallery() {
             if (!res.ok) throw new Error('Failed to fetch clips');
             const data = await res.json();
 
-            const newClips = data.clips || [];
+            const newClips = (data.clips || []).map((c) => ({ ...c, url: getApiUrl(c.url) }));
 
             if (append) {
                 setClips(prev => [...prev, ...newClips]);

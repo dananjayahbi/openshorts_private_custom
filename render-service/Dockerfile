@@ -17,6 +17,15 @@ WORKDIR /app
 COPY render-service/package.json render-service/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
+# Both copies of Remotion must be the same version. This lock pulls 4.0.446
+# while remotion/package-lock.json pulls 4.0.541; webpack resolves 'remotion'
+# from /app/node_modules, so @remotion/media 4.0.541 asked for the `Interactive`
+# export that 4.0.446 does not have and every bundle died with
+# "export 'Interactive' was not found in 'remotion'". --no-save keeps the
+# committed lock files untouched.
+RUN npm install --no-save --no-package-lock --no-audit --no-fund \
+      remotion@4.0.541 @remotion/bundler@4.0.541 @remotion/renderer@4.0.541
+
 COPY render-service/tsconfig.json ./
 COPY render-service/src/ ./src/
 

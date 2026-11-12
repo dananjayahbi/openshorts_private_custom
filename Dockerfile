@@ -50,6 +50,22 @@ RUN if [ "$GPU" = "1" ]; then LOCK=requirements-gpu.lock; else LOCK=requirements
  && pip check \
  && pip install --no-index --no-deps -q -r requirements.txt -r requirements-billing.txt
 
+# Local fork addition (documented fallback, off by default): the PyPI torch
+# wheel is built for CUDA 13 (cu130) and refuses to initialise on host drivers
+# older than 580 (e.g. 566.36 = CUDA 12.7, still current on a GTX 1660 Ti).
+# Setting TORCH_CUDA_INDEX=cu128 re-installs torch/torchvision from the cu128
+# index. It is NOT the recommended fix: torch 2.11+cu128 pulls a separate
+# cuda-toolkit 12.8 stack (~2.3 GB) that duplicates the CUDA 13 libraries
+# already in this image. Updating the host driver to 580+ is cheaper and keeps
+# the image identical to upstream. Empty = upstream behaviour (cu130).
+ARG TORCH_CUDA_INDEX=""
+RUN if [ -n "$TORCH_CUDA_INDEX" ]; then \
+      pip install --no-cache-dir --no-deps --force-reinstall \
+        --index-url "https://download.pytorch.org/whl/$TORCH_CUDA_INDEX" \
+        "torch==2.11.0+$TORCH_CUDA_INDEX" "torchvision==0.26.0+$TORCH_CUDA_INDEX" \
+      && python -c "import torch, sys; a = torch._C._cuda_getArchFlags(); print('torch', torch.__version__, a); sys.exit('sm_75' not in a)"; \
+    fi
+
 # osrender (osrender/, Rust): renders a reframed clip in one pass on the GPU
 # (gpu_render.py). Only GPU builds compile it; the CPU image ships without it
 # and renders through ffmpeg. It links the same Debian FFmpeg libraries the

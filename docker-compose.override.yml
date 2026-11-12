@@ -1,0 +1,60 @@
+# Local Windows/NVIDIA override (picked up automatically by docker compose).
+# GPU=1 adds the user-space CUDA libs (cuBLAS/cuDNN) and onnxruntime-gpu to the
+# image, and `capabilities: [gpu, video]` exposes NVENC to ffmpeg.
+#
+# Host ports (deliberately uncommon, and outside the 49152-65535 ephemeral
+# range so Windows never hands them to something else):
+#   API / FastAPI ........ http://localhost:18480
+#   Dashboard (Vite) ..... http://localhost:18481   <- open this one
+#   Renderer (Remotion) .. http://localhost:18482
+# The container ports are unchanged (8000 / 5173 / 3100): the Vite dev server
+# proxies to backend:8000 and renderer:3100 over the compose network, so only
+# the three host mappings below need to change to move the stack.
+services:
+  backend:
+    ports: !override
+      - "18480:8000"
+    build:
+      context: .
+      args:
+        GPU: "1"
+        # Left unset on purpose: the image's stock cu130 torch is correct once
+        # the host driver is 580+. Setting cu128 would pull a duplicate ~2.3 GB
+        # CUDA 12.8 stack (see the comment in the Dockerfile).
+        # TORCH_CUDA_INDEX: cu128
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+    environment:
+      # Persist the HuggingFace/whisper model cache outside the image so it is
+      # downloaded once and re-used across rebuilds.
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_DISABLE_XET=1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      # 6 GB card: expandable segments keeps torch from fragmenting the pool.
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - TRANSNETV2_DEVICE=cuda
+      # Used to build absolute clip URLs in webhook payloads / MCP results.
+      - PUBLIC_API_URL=http://localhost:18480
+    volumes:
+      - .:/app
+      - ./.cache/huggingface:/app/.cache/huggingface
+      - /app/__pycache__
+      - ./output:/app/output
+
+  frontend:
+    ports: !override
+      - "18481:5173"
+    environment:
+      # Keep the proxy pointed at the compose service, not the published host
+      # port, so the dashboard works regardless of the mapping above.
+      - VITE_PROXY_TARGET=http://backend:8000
+      - VITE_RENDER_TARGET=http://renderer:3100
+
+  renderer:
+    ports: !override
+      - "18482:3100"

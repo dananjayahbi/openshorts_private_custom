@@ -224,6 +224,9 @@ export function AuthProvider({ children }) {
   const value = {
     billingEnabled: config.billingEnabled,
     localLlm: config.localLlm || null,
+    // Self-host: the server already holds a Gemini key in its environment, so
+    // the dashboard does not have to nag for one in Settings.
+    geminiEnvKey: !!config.geminiEnvKey,
     googleAuthEnabled: config.googleAuthEnabled,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
     loading,

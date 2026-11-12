@@ -5047,6 +5047,9 @@ async def get_config():
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        # Self-host only: a server-side GEMINI_API_KEY in the environment means
+        # the dashboard does not need one pasted into Settings. Boolean only.
+        "geminiEnvKey": bool(os.environ.get("GEMINI_API_KEY")) and not BILLING_ENABLED,
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -9378,36 +9381,114 @@ async def thumbnail_publish_status(publish_id: str, request: Request):
     return {k: v for k, v in record.items() if k != "user_id"}
 
 
-# @app.get("/api/gallery/clips")
-# async def get_gallery_clips(limit: int = 20, offset: int = 0, refresh: bool = False):
-#     """
-#     Fetch clips from S3 for the gallery with pagination.
-#
-#     Args:
-#         limit: Number of clips to return (default 20, max 100)
-#         offset: Starting position for pagination
-#         refresh: Force refresh cache
-#     """
-#     try:
-#         # Clamp limit to reasonable values
-#         limit = min(max(1, limit), 100)
-#
-#         # Get clips (uses cache internally)
-#         all_clips = list_all_clips(limit=limit + offset, force_refresh=refresh)
-#
-#         # Apply offset for pagination
-#         clips = all_clips[offset:offset + limit]
-#
-#         return {
-#             "clips": clips,
-#             "total": len(all_clips),
-#             "limit": limit,
-#             "offset": offset,
-#             "has_more": len(all_clips) > offset + limit
-#         }
-#     except Exception as e:
-#         print(f"❌ Gallery Error: {e}")
-#         raise HTTPException(status_code=500, detail=str(e))
+def _gallery_clip_file(output_dir, clip_index):
+    """The file to show for clip ``clip_index`` (0-based) of a finished job.
+
+    Newest render wins: that is the captioned copy when the job produced one,
+    and the clean cut otherwise. The ``wm_`` watermark twin is skipped — it is
+    the same picture with a mark on it and the clean file sits next to it.
+    """
+    candidates = [
+        p for p in glob.glob(os.path.join(output_dir, f"*clip_{clip_index + 1}.mp4"))
+        if not os.path.basename(p).startswith("wm_")
+    ]
+    if not candidates:
+        return None
+    try:
+        return max(candidates, key=os.path.getmtime)
+    except OSError:
+        return candidates[0]
+
+
+def _gallery_entry(job_id, output_dir, index, clip, created_at):
+    """One gallery card, or None when the clip never rendered to disk."""
+    filename = _gallery_clip_file(output_dir, index)
+    if not filename:
+        return None
+    try:
+        duration = max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
+    except (TypeError, ValueError):
+        duration = 0.0
+    return {
+        "job_id": job_id,
+        "index": index,
+        "title": (clip.get("video_title_for_youtube_short")
+                  or clip.get("viral_hook_text")
+                  or f"Clip {index + 1}"),
+        "hook": clip.get("viral_hook_text"),
+        "url": f"/videos/{job_id}/{os.path.basename(filename)}",
+        "duration": duration,
+        "created_at": created_at,
+        "score": clip.get("predicted_score"),
+        "tiktok_desc": clip.get("video_description_for_tiktok"),
+        "insta_desc": clip.get("video_description_for_instagram"),
+    }
+
+
+@app.get("/api/gallery/clips")
+async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0):
+    """Every clip this instance has rendered, newest job first.
+
+    Self-host replacement for the R2-backed gallery: it reads the job dirs on
+    disk (the same files /videos serves) instead of listing an S3 bucket, so
+    the gallery works with no cloud credentials. Jobs are ordered by directory
+    mtime; clips keep the order the job's metadata lists them in.
+    """
+    limit = min(max(1, limit), 100)
+    owner = await _owner_id(request) if BILLING_ENABLED else None
+    thumbs = os.path.basename(THUMBNAILS_DIR)
+
+    try:
+        job_dirs = []
+        for name in os.listdir(OUTPUT_DIR):
+            path = os.path.join(OUTPUT_DIR, name)
+            if name == thumbs or _not_a_job_dir(name) or not os.path.isdir(path):
+                continue
+            if not glob.glob(os.path.join(path, "*_metadata.json")):
+                continue
+            if BILLING_ENABLED:
+                try:
+                    with open(os.path.join(path, ".owner")) as f:
+                        if f.read().strip() != str(owner):
+                            continue
+                except OSError:
+                    continue
+            try:
+                job_dirs.append((os.path.getmtime(path), name, path))
+            except OSError:
+                continue
+        job_dirs.sort(reverse=True)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Gallery scan failed: {e}")
+
+    clips = []
+    total = 0
+    for mtime, job_id, path in job_dirs:
+        json_files = glob.glob(os.path.join(path, "*_metadata.json"))
+        if not json_files:
+            continue
+        try:
+            with open(json_files[0]) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        created = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+        for index, clip in enumerate(data.get("shorts") or []):
+            entry = _gallery_entry(job_id, path, index, clip, created)
+            if entry is None:
+                continue
+            total += 1
+            if total > offset and len(clips) < limit:
+                clips.append(entry)
+
+    return {
+        "clips": clips,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": total > offset + len(clips),
+    }
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
