@@ -136,8 +136,16 @@ and reused on every later request.
   **delete (n)** opens the same dialog for the selected clips and removes them
   in one call. The job's metadata entry stays so the remaining clips keep
   their index/file pairing; the gallery skips an index with no file.
-- API: `DELETE /api/gallery/clip/{job_id}/{index}` and
-  `POST /api/gallery/delete {"clips": [...]}` (validated, max 200).
+- **A file held open** (a paused player, or a download manager saving the
+  MP4 — the exact situation the old `<video>` tiles caused) makes Windows
+  refuse the delete. The endpoint retries for ~3 s, then answers **409** with
+  *"still open in another program … close it and try again"*; the dialog keeps
+  the clip and the message, and the review state is not forgotten, so a retry
+  still knows it was marked used/archived. Bulk delete does not abort: the rest
+  go, and `failed` names the refs that stayed.
+- API: `DELETE /api/gallery/clip/{job_id}/{index}` (409 when locked) and
+  `POST /api/gallery/delete {"clips": [...]}` (validated, max 200, returns
+  `{deleted, files, failed}`).
 - The score is the moment picker's `predicted_score`, unchanged since the clip
   was chosen.
 
@@ -165,11 +173,32 @@ the file keeps them):
   Archived tab restores one clip; **archive used (N)** moves every used clip in
   one call.
 
-Filtering happens server-side (`GET /api/gallery/clips?view=active|archived|all`
-`&usage=any|used|unused`) before the page is cut, so the counts and infinite
-scroll agree. `PATCH /api/gallery/clip/{job_id}/{index}` sets the flags;
-`POST /api/gallery/archive-used` archives the used ones. Stale keys for deleted
-jobs are pruned on the next scan.
+Filtering and paging happen server-side (`GET /api/gallery/clips`) before the
+page is cut, so the tab badges, the pager and the grid agree with each other:
+
+- `limit` (max 100) + `page`, or the legacy `offset`; the answer carries
+  `total`, `page`, `pages` and `has_more`. A page past the end is clamped, not
+  an error, so a stale link lands on the last page.
+- `view=active|archived|all` and `usage=any|used|unused` (the four tabs).
+- `platform=any|youtube|facebook|both|none` — the independent per-platform
+  marks, not just the combined used flag.
+- `date=any|today|yesterday|week|month|custom` with `date_from`/`date_to`
+  (`YYYY-MM-DD`, both ends inclusive) for a custom range. Bounds are local
+  time and apply to the job's render time (its metadata file's mtime — the
+  directory's own mtime moves whenever a poster is written).
+- `sort=newest|oldest|longest|shortest|score` — sorting happens on the whole
+  filtered set before the page is cut, so "longest" is the longest in the
+  library, not on the page.
+- `q=` searches title, hook, tags, both captions and the job id.
+
+The web UI sends every one of these through its filter bar (search, rendered
+date, posted-on chips, sort, per-page size) and shows numbered server-side
+pages with prev/next instead of the old infinite scroll.
+
+`PATCH /api/gallery/clip/{job_id}/{index}` sets the flags;
+`POST /api/gallery/archive-used` archives every used clip (the button is hidden
+while a date/platform/search filter is active, because the call itself is not
+filtered). Stale keys for deleted jobs are pruned on the next scan.
 
 The modal player letterboxes the clip with `object-fit: contain` instead of
 cropping it, so a 16:9 or 1:1 render is shown in full.
@@ -591,18 +620,21 @@ uploaded by hand. The Settings field stays for when you want it back.
 
 ## Clip Gallery
 
-`GET /api/gallery/clips?limit=&offset=` scans `Storage/videos/<job_id>/`, reads
-each job's `*_metadata.json` and returns every clip that really rendered:
+`GET /api/gallery/clips?limit=&page=…` scans `Storage/videos/<job_id>/`, reads
+each job's `*_metadata.json` and returns the clips that really rendered:
 
-- newest job first, clips in metadata order
+- newest job first, clips in metadata order (or by `sort=`)
 - the file served is the **captioned** copy when the job made one (newest
   `*clip_N.mp4`), otherwise the clean cut; `wm_` twins are skipped
-- title, hook, TikTok/Instagram captions, duration, score, date
+- title, hook, TikTok/Instagram captions, duration, score, date, five tags
 - a `poster` URL for the tile (the cached JPEG still described above; `null`
   when the frame could not be extracted)
 - served through `/videos/<job_id>/<file>`, the same authenticated path the job
   results use
 - in cloud mode it filters by the job's `.owner` sidecar
+- filters (`view`, `usage`, `platform`, `date`/`date_from`/`date_to`, `sort`,
+  `q`) and paging (`limit`, `page`, legacy `offset`) all run before the page is
+  cut; the response adds `total`, `page`, `pages` and `has_more`.
 
 Clips live in `Storage/videos/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days)
 and are trimmed oldest-first once `OUTPUT_MAX_GB` is reached. To keep them on

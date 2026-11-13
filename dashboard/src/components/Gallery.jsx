@@ -1,16 +1,55 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-    AlertCircle, Archive, CheckCircle2, Circle, Loader2, Trash2, X,
+    AlertCircle, Archive, CheckCircle2, ChevronLeft, ChevronRight, Circle,
+    Loader2, Trash2, X,
 } from 'lucide-react';
 import { getApiUrl } from '../config';
 import GalleryCard from './GalleryCard';
 import ClipModal from './ClipModal';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
+import SegmentedControl from './ui/SegmentedControl';
 
-const CLIPS_PER_PAGE = 24;
+// Server-side paging: the page number goes to the API and the answer already
+// is the page, so a library with thousands of clips costs one small query.
+const PAGE_SIZES = [24, 48, 96];
+const DEFAULT_PAGE_SIZE = 24;
 
-// One tab = one server-side filter, so the page counts and the infinite scroll
-// agree with what is on screen (filtering after a page was cut made it lie).
+const EMPTY_FILTERS = {
+    date: 'any',
+    from: '',
+    to: '',
+    platform: 'any',
+    sort: 'newest',
+    q: '',
+};
+
+const DATE_OPTIONS = [
+    { value: 'any', label: 'any time' },
+    { value: 'today', label: 'today' },
+    { value: 'yesterday', label: 'yesterday' },
+    { value: 'week', label: 'this week' },
+    { value: 'month', label: 'this month' },
+    { value: 'custom', label: 'custom range' },
+];
+
+const PLATFORM_OPTIONS = [
+    { value: 'any', label: 'any' },
+    { value: 'youtube', label: 'youtube' },
+    { value: 'facebook', label: 'facebook' },
+    { value: 'both', label: 'both' },
+    { value: 'none', label: 'not posted' },
+];
+
+const SORT_OPTIONS = [
+    { value: 'newest', label: 'newest first' },
+    { value: 'oldest', label: 'oldest first' },
+    { value: 'longest', label: 'longest first' },
+    { value: 'shortest', label: 'shortest first' },
+    { value: 'score', label: 'best score' },
+];
+
+// One tab = one server-side filter, so the counts and the pager agree with what
+// is on screen (filtering after a page was cut made the numbers lie).
 const TABS = [
     { id: 'library', label: 'Library', view: 'active', usage: 'any' },
     { id: 'used', label: 'Used', view: 'active', usage: 'used' },
@@ -18,19 +57,54 @@ const TABS = [
     { id: 'archived', label: 'Archived', view: 'archived', usage: 'any' },
 ];
 
-const bucketOf = (flags) => (flags.archived ? 'archived' : flags.used ? 'used' : 'unused');
 const keyOf = (clip) => `${clip.job_id}:${clip.index}`;
+
+const todayInput = () => {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
+// The API's error detail is what the user needs ("still open in another
+// program"), not a raw JSON body.
+const readError = async (res) => {
+    try {
+        const body = await res.json();
+        if (typeof body?.detail === 'string') return body.detail;
+        if (body?.detail?.message) return body.detail.message;
+    } catch (_) { /* not JSON */ }
+    return `HTTP ${res.status}`;
+};
+
+// Windowed page numbers: 1 … 4 5 6 … 12.
+const pageList = (page, pages) => {
+    if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+    const wanted = [...new Set([1, pages, page - 1, page, page + 1])]
+        .filter((n) => n >= 1 && n <= pages)
+        .sort((a, b) => a - b);
+    const out = [];
+    let previous = 0;
+    for (const n of wanted) {
+        if (previous && n - previous > 1) out.push('…');
+        out.push(n);
+        previous = n;
+    }
+    return out;
+};
 
 export default function Gallery() {
     const [clips, setClips] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState(null);
     const [actionError, setActionError] = useState('');
-    const [hasMore, setHasMore] = useState(true);
-    const [offset, setOffset] = useState(0);
     const [tab, setTab] = useState('library');
     const [counts, setCounts] = useState({ used: 0, unused: 0, archived: 0 });
+    const [page, setPage] = useState(1);
+    const [pages, setPages] = useState(0);
+    const [total, setTotal] = useState(0);
+    const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+    const [filters, setFilters] = useState(EMPTY_FILTERS);
+    const [search, setSearch] = useState('');
     const [archiving, setArchiving] = useState(false);
     // Full-viewport player: cards are posters, this is the only place a clip
     // plays (and where its copy/platforms are edited).
@@ -44,119 +118,105 @@ export default function Gallery() {
     const [pendingDelete, setPendingDelete] = useState([]);
     const [deleteError, setDeleteError] = useState('');
 
-    const loaderRef = useRef(null);
+    const scrollRef = useRef(null);
     const activeTab = TABS.find((t) => t.id === tab) || TABS[0];
+    const filtersActive = filters.date !== 'any' || filters.platform !== 'any' || !!filters.q;
 
-    const fetchClips = useCallback(async (currentOffset = 0, append = false) => {
+    const fetchClips = useCallback(async (targetPage = 1) => {
+        // A half-filled custom range is still being edited; keep the last
+        // result instead of asking the API for an impossible window.
+        if (filters.date === 'custom' && (!filters.from || !filters.to)) {
+            setLoading(false);
+            return;
+        }
+        setLoading(true);
         try {
-            if (currentOffset === 0) setLoading(true);
-            else setLoadingMore(true);
-
             const params = new URLSearchParams({
-                limit: String(CLIPS_PER_PAGE),
-                offset: String(currentOffset),
+                limit: String(pageSize),
+                page: String(Math.max(1, targetPage)),
                 view: activeTab.view,
                 usage: activeTab.usage,
+                platform: filters.platform,
+                sort: filters.sort,
             });
+            if (filters.date !== 'any') params.set('date', filters.date);
+            if (filters.date === 'custom') {
+                params.set('date_from', filters.from);
+                params.set('date_to', filters.to);
+            }
+            if (filters.q) params.set('q', filters.q);
+
             const res = await fetch(getApiUrl(`/api/gallery/clips?${params.toString()}`));
-            if (!res.ok) throw new Error('Failed to fetch clips');
+            if (!res.ok) throw new Error(await readError(res));
             const data = await res.json();
 
-            const newClips = (data.clips || []).map((c) => ({
+            setClips((data.clips || []).map((c) => ({
                 ...c,
                 url: getApiUrl(c.url),
                 poster: c.poster ? getApiUrl(c.poster) : null,
-            }));
-
-            if (append) {
-                setClips(prev => [...prev, ...newClips]);
-            } else {
-                setClips(newClips);
-            }
+            })));
             if (data.counts) setCounts(data.counts);
-
-            setHasMore(data.has_more ?? newClips.length === CLIPS_PER_PAGE);
-            setOffset(currentOffset + newClips.length);
+            setPage(data.page || 1);
+            setPages(data.pages || 0);
+            setTotal(data.total || 0);
             setError(null);
         } catch (err) {
             setError(err.message);
         } finally {
             setLoading(false);
-            setLoadingMore(false);
         }
-    }, [activeTab.view, activeTab.usage]);
+    }, [activeTab.view, activeTab.usage, filters, pageSize]);
 
-    // Initial load, and a fresh page whenever the tab changes.
+    // Initial load, and a fresh first page whenever a tab/filter/page size
+    // changes: staying on page 7 of a narrower result set would be confusing.
     useEffect(() => {
-        setClips([]);
-        setOffset(0);
-        setHasMore(true);
         setSelected(new Set());
         setSelectMode(false);
-        fetchClips(0, false);
+        fetchClips(1);
     }, [fetchClips]);
 
-    // Infinite scroll observer
+    // Typing is debounced so a search does not fire one query per keystroke.
     useEffect(() => {
-        if (!hasMore || loadingMore || loading) return;
+        const id = setTimeout(() => {
+            setFilters((prev) => (prev.q === search ? prev : { ...prev, q: search.trim() }));
+        }, 350);
+        return () => clearTimeout(id);
+    }, [search]);
 
-        const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries[0].isIntersecting && hasMore && !loadingMore) {
-                    fetchClips(offset, true);
-                }
-            },
-            { rootMargin: '200px', threshold: 0.1 }
-        );
+    const goToPage = (next) => {
+        if (loading || next === page || next < 1 || (pages && next > pages)) return;
+        setSelected(new Set());
+        fetchClips(next);
+        scrollRef.current?.scrollTo({ top: 0 });
+    };
 
-        const node = loaderRef.current;
-        if (node) {
-            observer.observe(node);
-        }
+    const updateFilter = (patch) => {
+        setFilters((prev) => ({ ...prev, ...patch }));
+    };
 
-        return () => {
-            if (node) {
-                observer.unobserve(node);
-            }
-        };
-    }, [hasMore, loadingMore, loading, offset, fetchClips]);
+    const resetFilters = () => {
+        setSearch('');
+        setFilters(EMPTY_FILTERS);
+    };
 
-    // A clip that changed stays only while it still matches the tab; the counts
-    // move with it either way.
+    // A clip that changed is re-read from the server: with platform/date/search
+    // filters, local guessing about whether it still matches would lie.
     const handleChanged = (clip, flags) => {
-        setCounts((prev) => {
-            const next = { ...prev };
-            next[bucketOf(clip)] = Math.max(0, (next[bucketOf(clip)] || 0) - 1);
-            next[bucketOf(flags)] = (next[bucketOf(flags)] || 0) + 1;
-            return next;
-        });
-        const stillMatches = (activeTab.view === 'archived'
-            ? flags.archived
-            : !flags.archived)
-            && (activeTab.usage === 'any'
-                || (activeTab.usage === 'used' ? flags.used : !flags.used));
         const merged = { ...clip, ...flags };
-        setClips((prev) => {
-            if (flags.archived && activeTab.view !== 'archived' && activeTab.view !== 'all') {
-                return prev.filter((c) => keyOf(c) !== keyOf(clip));
-            }
-            return stillMatches
-                ? prev.map((c) => (keyOf(c) === keyOf(clip) ? merged : c))
-                : prev.filter((c) => keyOf(c) !== keyOf(clip));
-        });
         setActive((current) => (current && keyOf(current) === keyOf(clip) ? merged : current));
+        fetchClips(page);
     };
 
     const archiveAllUsed = async () => {
         if (!window.confirm(`Archive all ${counts.used} clip(s) marked used? The files stay on disk; they move to the Archived tab.`)) return;
         setArchiving(true);
-        setError(null);
+        setActionError('');
         try {
             const res = await fetch(getApiUrl('/api/gallery/archive-used'), { method: 'POST' });
-            if (!res.ok) throw new Error((await res.text()).slice(0, 200) || 'Archive failed');
-            await fetchClips(0, false);
+            if (!res.ok) throw new Error(await readError(res));
+            await fetchClips(1);
         } catch (e) {
-            setError(String(e.message || e).slice(0, 200));
+            setActionError(String(e.message || e).slice(0, 200));
         } finally {
             setArchiving(false);
         }
@@ -198,50 +258,74 @@ export default function Gallery() {
                     clips: targets.map((c) => ({ job_id: c.job_id, index: c.index })),
                 }),
             });
-            if (!res.ok) throw new Error((await res.text()).slice(0, 240) || `HTTP ${res.status}`);
+            if (!res.ok) throw new Error(await readError(res));
             const data = await res.json();
-            setPendingDelete([]);
-            setSelected(new Set());
-            setSelectMode(false);
+            const failed = data.failed || [];
+            const failedKeys = new Set(failed.map((f) => `${f.job_id}:${f.index}`));
+            if (failed.length) {
+                // Some files are still open in a player/download manager: keep
+                // just those in the dialog so the message names what stayed.
+                setPendingDelete(targets.filter((t) => failedKeys.has(keyOf(t))));
+                setDeleteError(
+                    `${failed.length} clip(s) could not be deleted because a file is still `
+                    + "open in another program (the clip player or a download manager). "
+                    + "Close it and try again.",
+                );
+            } else {
+                setPendingDelete([]);
+                setSelected(new Set());
+                setSelectMode(false);
+            }
             setActive((current) => (
-                current && targets.some((c) => keyOf(c) === keyOf(current)) ? null : current));
-            if (!data.deleted) {
+                current && targets.some((t) => keyOf(t) === keyOf(current)
+                    && !failedKeys.has(keyOf(t))) ? null : current));
+            if (!data.deleted && !failed.length) {
                 setActionError('Nothing was deleted — the files were already gone.');
             }
-            await fetchClips(0, false);
+            await fetchClips(page);
         } catch (e) {
             // Keep the dialog open so the message is next to the action that
-            // failed (the old window.confirm swallowed it into actionError).
+            // failed. 409 means a file is locked; say so in plain words.
             setDeleteError(String(e.message || e).slice(0, 240));
         } finally {
             setDeleting(false);
         }
     };
 
-    if (loading) {
-        return (
-            <div className="h-full flex flex-col items-center justify-center text-muted animate-fade">
-                <Loader2 size={32} className="animate-spin mb-4 text-brass" />
-                <p className="lowercase">Loading your viral history...</p>
-            </div>
-        );
-    }
-
     if (error) {
         return (
             <div className="h-full flex flex-col items-center justify-center text-danger p-6">
                 <AlertCircle size={32} className="mb-4" />
                 <p>Error loading gallery: {error}</p>
-                <button
-                    onClick={() => {
-                        setError(null);
-                        setOffset(0);
-                        fetchClips(0, false);
-                    }}
-                    className="btn-quiet mt-4"
-                >
-                    Retry
-                </button>
+                <div className="flex items-center gap-2 mt-4">
+                    <button
+                        onClick={() => {
+                            setError(null);
+                            fetchClips(page);
+                        }}
+                        className="btn-quiet"
+                    >
+                        retry
+                    </button>
+                    <button
+                        onClick={() => {
+                            setError(null);
+                            resetFilters();
+                        }}
+                        className="btn-quiet"
+                    >
+                        reset filters
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    if (loading && clips.length === 0) {
+        return (
+            <div className="h-full flex flex-col items-center justify-center text-muted animate-fade">
+                <Loader2 size={32} className="animate-spin mb-4 text-brass" />
+                <p className="lowercase">Loading your viral history...</p>
             </div>
         );
     }
@@ -255,9 +339,11 @@ export default function Gallery() {
 
     const selectedClips = clips.filter((c) => selected.has(keyOf(c)));
     const allSelected = clips.length > 0 && selectedClips.length === clips.length;
+    const firstShown = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    const lastShown = (page - 1) * pageSize + clips.length;
 
     return (
-        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
+        <div ref={scrollRef} className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
             <div className="w-full p-3 sm:p-6">
                 <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
                     <div>
@@ -265,7 +351,7 @@ export default function Gallery() {
                         <h1 className="font-display lowercase text-2xl text-ink">Clip Gallery</h1>
                     </div>
                     <div className="flex items-center gap-2">
-                        {counts.used > 0 && tab !== 'archived' && (
+                        {counts.used > 0 && tab !== 'archived' && !filtersActive && (
                             <button
                                 type="button"
                                 onClick={archiveAllUsed}
@@ -277,8 +363,9 @@ export default function Gallery() {
                                 archive used ({counts.used})
                             </button>
                         )}
-                        <span className="readout">
-                            {clips.length}{hasMore ? '+' : ''} shown · {counts.used + counts.unused + counts.archived} total
+                        <span className="readout tabular-nums">
+                            {total === 0 ? '0 clips' : `${firstShown}–${lastShown} of ${total}`}
+                            {' · '}page {page}/{pages || 1}
                         </span>
                     </div>
                 </div>
@@ -300,6 +387,118 @@ export default function Gallery() {
                             </button>
                         );
                     })}
+                </div>
+
+                {/* Filters: all server-side, so they narrow the whole library,
+                    not just the page in hand. */}
+                <div className="card p-2.5 sm:p-3 mb-3">
+                    <div className="flex flex-wrap items-end gap-2">
+                        <label className="grow min-w-[170px]">
+                            <span className="eyebrow block mb-1">search</span>
+                            <input
+                                type="search"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                placeholder="title, tag or job id"
+                                className="input-field w-full text-xs py-1.5"
+                            />
+                        </label>
+
+                        <label>
+                            <span className="eyebrow block mb-1">rendered</span>
+                            <select
+                                value={filters.date}
+                                onChange={(e) => {
+                                    const date = e.target.value;
+                                    if (date === 'custom') {
+                                        const start = filters.from || todayInput();
+                                        updateFilter({ date, from: start, to: filters.to || start });
+                                    } else {
+                                        updateFilter({ date });
+                                    }
+                                }}
+                                className="input-field text-xs py-1.5"
+                            >
+                                {DATE_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        {filters.date === 'custom' && (
+                            <>
+                                <label>
+                                    <span className="eyebrow block mb-1">from</span>
+                                    <input
+                                        type="date"
+                                        value={filters.from}
+                                        max={filters.to || undefined}
+                                        onChange={(e) => updateFilter({ from: e.target.value })}
+                                        className="input-field text-xs py-1.5"
+                                    />
+                                </label>
+                                <label>
+                                    <span className="eyebrow block mb-1">to</span>
+                                    <input
+                                        type="date"
+                                        value={filters.to}
+                                        min={filters.from || undefined}
+                                        onChange={(e) => updateFilter({ to: e.target.value })}
+                                        className="input-field text-xs py-1.5"
+                                    />
+                                </label>
+                            </>
+                        )}
+
+                        <label>
+                            <span className="eyebrow block mb-1">sort</span>
+                            <select
+                                value={filters.sort}
+                                onChange={(e) => updateFilter({ sort: e.target.value })}
+                                className="input-field text-xs py-1.5"
+                            >
+                                {SORT_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        <label>
+                            <span className="eyebrow block mb-1">per page</span>
+                            <select
+                                value={pageSize}
+                                onChange={(e) => setPageSize(Number(e.target.value))}
+                                className="input-field text-xs py-1.5"
+                            >
+                                {PAGE_SIZES.map((n) => (
+                                    <option key={n} value={n}>{n}</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        {(filtersActive || filters.sort !== 'newest' || search) && (
+                            <button
+                                type="button"
+                                onClick={resetFilters}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                            >
+                                <X size={12} /> reset filters
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="mt-2.5">
+                        <span className="eyebrow block mb-1">posted on</span>
+                        <div className="max-w-md">
+                            <SegmentedControl
+                                options={PLATFORM_OPTIONS}
+                                value={filters.platform}
+                                onChange={(platform) => updateFilter({ platform })}
+                                size="sm"
+                                columns={5}
+                            />
+                        </div>
+                    </div>
                 </div>
 
                 {/* Select / bulk delete toolbar */}
@@ -339,6 +538,11 @@ export default function Gallery() {
                             </button>
                         </>
                     )}
+                    {loading && (
+                        <span className="readout flex items-center gap-1.5">
+                            <Loader2 size={12} className="animate-spin" /> loading
+                        </span>
+                    )}
                     <span className="ml-auto readout hidden sm:inline">click a clip to play</span>
                 </div>
 
@@ -353,7 +557,14 @@ export default function Gallery() {
 
                 {clips.length === 0 ? (
                     <div className="text-center py-20 text-muted">
-                        {tab === 'archived' ? (
+                        {filtersActive ? (
+                            <>
+                                <p className="text-lg mb-2 lowercase">No clips match these filters.</p>
+                                <button type="button" onClick={resetFilters} className="btn-quiet text-xs py-1.5 px-2.5">
+                                    reset filters
+                                </button>
+                            </>
+                        ) : tab === 'archived' ? (
                             <>
                                 <p className="text-lg mb-2 lowercase">Nothing archived.</p>
                                 <p className="text-sm lowercase">Archive clips you are done with; the files stay on disk.</p>
@@ -367,7 +578,7 @@ export default function Gallery() {
                     </div>
                 ) : (
                     <>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 gap-2.5 sm:gap-3 pb-10">
+                        <div className={`grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 gap-2.5 sm:gap-3 pb-4 transition-opacity ${loading ? 'opacity-60' : ''}`}>
                             {clips.map((clip) => (
                                 <GalleryCard
                                     key={keyOf(clip)}
@@ -381,15 +592,44 @@ export default function Gallery() {
                             ))}
                         </div>
 
-                        {/* Infinite scroll loader trigger */}
-                        {hasMore && (
-                            <div ref={loaderRef} className="flex justify-center py-8">
-                                {loadingMore && (
-                                    <div className="flex items-center gap-2 text-muted">
-                                        <Loader2 size={20} className="animate-spin" />
-                                        <span className="text-sm lowercase">Loading more clips...</span>
-                                    </div>
-                                )}
+                        {pages > 1 && (
+                            <div className="flex flex-wrap items-center justify-center gap-1.5 py-6">
+                                <button
+                                    type="button"
+                                    onClick={() => goToPage(page - 1)}
+                                    disabled={page <= 1 || loading}
+                                    className="btn-quiet text-xs py-1.5 px-2.5 flex items-center gap-1"
+                                    aria-label="Previous page"
+                                >
+                                    <ChevronLeft size={13} /> prev
+                                </button>
+                                {pageList(page, pages).map((n, i) => (
+                                    n === '…' ? (
+                                        <span key={`gap-${i}`} className="readout px-1">…</span>
+                                    ) : (
+                                        <button
+                                            key={n}
+                                            type="button"
+                                            onClick={() => goToPage(n)}
+                                            disabled={loading}
+                                            aria-current={n === page ? 'page' : undefined}
+                                            className={`min-w-8 text-xs py-1.5 px-2 rounded-input tabular-nums transition-colors ${n === page
+                                                ? 'bg-[color:var(--color-accent)] text-brassink'
+                                                : 'btn-quiet'}`}
+                                        >
+                                            {n}
+                                        </button>
+                                    )
+                                ))}
+                                <button
+                                    type="button"
+                                    onClick={() => goToPage(page + 1)}
+                                    disabled={page >= pages || loading}
+                                    className="btn-quiet text-xs py-1.5 px-2.5 flex items-center gap-1"
+                                    aria-label="Next page"
+                                >
+                                    next <ChevronRight size={13} />
+                                </button>
                             </div>
                         )}
                     </>

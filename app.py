@@ -2812,6 +2812,20 @@ def _not_a_job_dir(name) -> bool:
     return str(name).startswith(".")
 
 
+def _job_render_time(job_path):
+    """When a job finished rendering: its metadata file's mtime.
+
+    The directory's own mtime moves whenever anything is written inside it — a
+    gallery poster, an editor temp file — so retention, the output size cap and
+    the gallery's ordering all use the metadata instead. Falls back to the
+    directory mtime for a directory that has no metadata (yet).
+    """
+    metas = glob.glob(os.path.join(job_path, "*_metadata.json"))
+    if metas:
+        return max(os.path.getmtime(p) for p in metas)
+    return os.path.getmtime(job_path)
+
+
 def _sweep_expired_job_dirs(now):
     """Drop job dirs older than JOB_RETENTION_SECONDS, except live jobs."""
     for job_id in os.listdir(OUTPUT_DIR):
@@ -2823,7 +2837,7 @@ def _sweep_expired_job_dirs(now):
         if not os.path.isdir(job_path):
             continue
         try:
-            expired = now - os.path.getmtime(job_path) > JOB_RETENTION_SECONDS
+            expired = now - _job_render_time(job_path) > JOB_RETENTION_SECONDS
         except OSError:
             continue
         if not expired or _job_is_active(job_id, now):
@@ -2895,7 +2909,7 @@ def _enforce_output_size_cap():
         p = os.path.join(OUTPUT_DIR, job_id)
         if os.path.isdir(p) and not _job_is_active(job_id):
             try:
-                candidates.append((os.path.getmtime(p), p, job_id))
+                candidates.append((_job_render_time(p), p, job_id))
             except OSError:
                 pass
     candidates.sort()  # oldest first
@@ -10363,7 +10377,7 @@ def _make_gallery_poster(output_dir, clip_path, index, duration):
     try:
         # A truncated or placeholder file cannot yield a frame; do not pay for
         # an ffmpeg start (and a failed extraction on every poll) for it.
-        if os.path.getsize(clip_path) < 1024:
+        if os.path.getsize(clip_path) < 16 * 1024:
             return None
     except OSError:
         return None
@@ -10416,26 +10430,110 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
     }
 
 
+GALLERY_DATE_PRESETS = ("any", "today", "yesterday", "week", "month", "custom")
+GALLERY_PLATFORMS = ("any", "youtube", "facebook", "both", "none")
+GALLERY_SORTS = ("newest", "oldest", "longest", "shortest", "score")
+
+
+def _gallery_date_window(preset: str, date_from: str, date_to: str):
+    """Epoch bounds for the Rendered-date filter, in the server's local time.
+
+    ``(None, None)`` filters nothing. A malformed custom range raises ValueError
+    so the endpoint answers 400 instead of silently ignoring the dates.
+    """
+    now = datetime.now().astimezone()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if preset == "today":
+        return midnight.timestamp(), None
+    if preset == "yesterday":
+        return (midnight - timedelta(days=1)).timestamp(), midnight.timestamp()
+    if preset == "week":
+        return (midnight - timedelta(days=now.weekday())).timestamp(), None
+    if preset == "month":
+        return midnight.replace(day=1).timestamp(), None
+    if preset != "custom":
+        return None, None
+    try:
+        start = datetime.strptime(date_from, "%Y-%m-%d").astimezone()
+        end = datetime.strptime(date_to or date_from, "%Y-%m-%d").astimezone()
+    except (TypeError, ValueError):
+        raise ValueError("custom dates must be YYYY-MM-DD (date_from and date_to)")
+    end += timedelta(days=1)  # the end date is inclusive
+    if end <= start:
+        raise ValueError("date_to must be on or after date_from")
+    return start.timestamp(), end.timestamp()
+
+
+def _gallery_platform_match(state, platform: str) -> bool:
+    platforms = state.get("platforms") or {}
+    facebook = bool(platforms.get("facebook"))
+    youtube = bool(platforms.get("youtube"))
+    if platform == "youtube":
+        return youtube
+    if platform == "facebook":
+        return facebook
+    if platform == "both":
+        return youtube and facebook
+    if platform == "none":
+        return not youtube and not facebook
+    return True
+
+
+def _gallery_matches_query(entry, query: str) -> bool:
+    """Case-insensitive search over the editorial fields a user would type."""
+    if not query:
+        return True
+    needle = query.casefold()
+    haystack = " ".join(str(entry.get(key) or "") for key in (
+        "title", "hook", "tags", "tiktok_desc", "insta_desc", "job_id"))
+    return needle in haystack.casefold()
+
+
 @app.get("/api/gallery/clips")
-async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
-                            view: str = "active", usage: str = "any"):
-    """Every clip this instance has rendered, newest job first.
+async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
+                            offset: Optional[int] = None,
+                            view: str = "active", usage: str = "any",
+                            platform: str = "any",
+                            date: str = "any", date_from: str = "", date_to: str = "",
+                            sort: str = "newest", q: str = ""):
+    """Every clip this instance has rendered, paged and filtered server-side.
 
     Self-host replacement for the R2-backed gallery: it reads the job dirs on
     disk (the same files /videos serves) instead of listing an S3 bucket, so
-    the gallery works with no cloud credentials. Jobs are ordered by directory
-    mtime; clips keep the order the job's metadata lists them in.
+    the gallery works with no cloud credentials.
 
-    ``view``  active (default: not archived) | archived | all
-    ``usage`` any | used | unused — the per-clip "I already posted this" mark.
+    ``limit`` + ``page`` are the paging contract (``offset`` is still accepted
+    for older callers and is converted to a page). The filters run before the
+    page is cut, so ``total``/``pages`` describe what the caller is paging
+    through; ``counts`` describes the date/platform/search-filtered set and
+    ignores ``view``/``usage`` so the tab badges stay meaningful.
 
-    Filtering happens before the page is cut, so ``total`` and ``has_more``
-    describe the filtered list the caller is paging through, not the whole
-    library. ``counts`` always covers everything, for the tab badges.
+    - ``view``     active (default: not archived) | archived | all
+    - ``usage``    any | used | unused — the per-clip "I already posted this" mark
+    - ``platform`` any | youtube | facebook | both | none — per-platform marks
+    - ``date``     any | today | yesterday | week | month | custom (with
+                   ``date_from``/``date_to`` as YYYY-MM-DD, inclusive)
+    - ``sort``     newest | oldest | longest | shortest | score
+    - ``q``        words to find in title, hook, tags, captions or job id
+
+    ``limit`` is capped at 100. A page past the end comes back empty with the
+    real ``page`` (clamped to ``pages``) so a stale link cannot 500.
     """
     limit = min(max(1, limit), 100)
     view = view if view in ("active", "archived", "all") else "active"
     usage = usage if usage in ("used", "unused") else "any"
+    platform = platform if platform in GALLERY_PLATFORMS else "any"
+    date = date if date in GALLERY_DATE_PRESETS else "any"
+    sort = sort if sort in GALLERY_SORTS else "newest"
+    query = (q or "").strip()[:100]
+    page = max(1, int(page or 1))
+    if offset is not None:
+        page = max(1, int(offset) // limit + 1)
+    try:
+        start_epoch, end_epoch = _gallery_date_window(
+            date, (date_from or "").strip(), (date_to or "").strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     owner = await _owner_id(request) if BILLING_ENABLED else None
     thumbs = os.path.basename(THUMBNAILS_DIR)
 
@@ -10445,7 +10543,8 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
             path = os.path.join(OUTPUT_DIR, name)
             if name == thumbs or _not_a_job_dir(name) or not os.path.isdir(path):
                 continue
-            if not glob.glob(os.path.join(path, "*_metadata.json")):
+            json_files = glob.glob(os.path.join(path, "*_metadata.json"))
+            if not json_files:
                 continue
             if BILLING_ENABLED:
                 try:
@@ -10455,25 +10554,28 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
                 except OSError:
                     continue
             try:
-                job_dirs.append((os.path.getmtime(path), name, path))
+                # The metadata's mtime is the render time; the directory's
+                # moves when a poster or an editor temp file is written.
+                job_dirs.append((os.path.getmtime(json_files[0]), name, path, json_files[0]))
             except OSError:
                 continue
         job_dirs.sort(reverse=True)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Gallery scan failed: {e}")
 
-    clips = []
-    total = 0
+    matched = []
     counts = {"unused": 0, "used": 0, "archived": 0}
     known = []
     states = await asyncio.to_thread(clip_state.snapshot)
-    empty = {"used": False, "archived": False, "used_at": None, "archived_at": None}
-    for mtime, job_id, path in job_dirs:
-        json_files = glob.glob(os.path.join(path, "*_metadata.json"))
-        if not json_files:
+    empty = {"used": False, "archived": False, "used_at": None, "archived_at": None,
+             "platforms": {"facebook": False, "youtube": False}, "platform_times": {}}
+    for mtime, job_id, path, meta_path in job_dirs:
+        if start_epoch is not None and mtime < start_epoch:
+            continue
+        if end_epoch is not None and mtime >= end_epoch:
             continue
         try:
-            with open(json_files[0]) as f:
+            with open(meta_path) as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
@@ -10483,13 +10585,19 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
             if entry is None:
                 continue
             known.append((job_id, index))
-            state = states.get(f"{job_id}:{index}", empty)
+            state = states.get(f"{job_id}:{index}") or empty
             entry.update(state)
+            if not _gallery_platform_match(state, platform):
+                continue
+            if not _gallery_matches_query(entry, query):
+                continue
             if state["archived"]:
                 counts["archived"] += 1
-                in_view = view in ("archived", "all")
             else:
                 counts["used" if state["used"] else "unused"] += 1
+            if state["archived"]:
+                in_view = view in ("archived", "all")
+            else:
                 in_view = view in ("active", "all")
             if not in_view:
                 continue
@@ -10497,9 +10605,27 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
                 continue
             if usage == "unused" and state["used"]:
                 continue
-            total += 1
-            if total > offset and len(clips) < limit:
-                clips.append(entry)
+            matched.append(entry)
+
+    # Newest first is the stable base order — and inside a job, clips stay in
+    # metadata order (the negative index is what makes reverse=True ascending
+    # on the index). The other sorts reorder this base without shuffling ties.
+    matched.sort(key=lambda c: (c["created_at"], -c["index"]), reverse=True)
+    if sort == "oldest":
+        matched.sort(key=lambda c: (c["created_at"], c["index"]))
+    elif sort == "longest":
+        matched.sort(key=lambda c: c.get("duration") or 0.0, reverse=True)
+    elif sort == "shortest":
+        matched.sort(key=lambda c: c.get("duration") or 0.0)
+    elif sort == "score":
+        matched.sort(key=lambda c: c.get("score") if c.get("score") is not None else -1,
+                     reverse=True)
+
+    total = len(matched)
+    pages = (total + limit - 1) // limit
+    page = min(page, pages) if pages else 1
+    start = (page - 1) * limit
+    clips = matched[start:start + limit]
 
     # Tiles are stills (see _make_gallery_poster). Fill the ones this page
     # needs in parallel; clips left out by the page/filters cost nothing, and
@@ -10526,18 +10652,25 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
         await asyncio.gather(*(_fill(c) for c in missing))
 
     # Drop state for clips whose job directory was deleted (retention sweep).
-    try:
-        await asyncio.to_thread(clip_state.prune, known)
-    except OSError:
-        pass
+    # Only a scan without a date window sees every clip, so only it may prune:
+    # a date filter skips whole jobs before `known` is built, and pruning from
+    # that short list would erase the used/archived marks of everything outside
+    # the window (a real bug caught against a live library, 14-nov-2026).
+    if date == "any":
+        try:
+            await asyncio.to_thread(clip_state.prune, known)
+        except OSError:
+            pass
 
     return {
         "clips": clips,
         "total": total,
         "counts": counts,
         "limit": limit,
-        "offset": offset,
-        "has_more": total > offset + len(clips),
+        "page": page,
+        "pages": pages,
+        "offset": start,
+        "has_more": page < pages,
     }
 
 
@@ -10601,26 +10734,54 @@ async def archive_used_clips():
     return {"archived": archived}
 
 
-def _delete_gallery_clip_files(job_id: str, index: int) -> list:
+def _delete_gallery_clip_files(job_id: str, index: int, wait: bool = True):
     """Delete one clip's rendered file(s) and its review state.
 
     Every file for that index goes (the clean cut, its captioned/subtitled
-    twin, the watermark twin and the layout sidecar): leaving one behind would
-    make the card come back with the wrong copy. The metadata entry stays, so
-    the other clips keep their index/file pairing; the gallery skips an index
-    with no file, which is exactly what a deleted clip is.
+    twin, the watermark twin, the poster and the layout sidecar): leaving one
+    behind would make the card come back with the wrong copy. The metadata
+    entry stays, so the other clips keep their index/file pairing; the gallery
+    skips an index with no file, which is exactly what a deleted clip is.
+
+    Returns ``(removed, blocked)``. A blocked file is one Windows would not
+    release — a player or a download manager still holds it open — and must not
+    be reported as deleted: the card is still there, so the caller answers
+    "could not delete" instead of "nothing was deleted" (which read as if the
+    files had vanished on their own).
+
+    ``wait`` retries a locked file for ~3 s: a browser that just closed a
+    <video> drops the handle quickly. Bulk delete passes False so one locked
+    clip cannot stall a 200-clip batch — it is reported and can be retried.
     """
     job_dir = os.path.join(OUTPUT_DIR, job_id)
-    removed = []
+    removed, blocked = [], []
+    tries, delay = (12, 0.25) if wait else (1, 0)
     if os.path.isdir(job_dir):
-        for path in glob.glob(os.path.join(job_dir, f"*clip_{index + 1}.mp4*")):
-            if _remove_tree(path):
-                removed.append(os.path.basename(path))
+        targets = glob.glob(os.path.join(job_dir, f"*clip_{index + 1}.mp4*"))
         poster = os.path.join(job_dir, _gallery_poster_name(index))
-        if os.path.exists(poster) and _remove_tree(poster):
+        for path in targets:
+            if not os.path.exists(path):
+                continue
+            if _remove_tree(path, tries=tries, delay=delay):
+                removed.append(os.path.basename(path))
+            elif os.path.exists(path):
+                blocked.append(os.path.basename(path))
+        # A poster the browser still holds must not keep a deleted card alive:
+        # it is a tiny JPEG, and losing it only costs one re-extraction if the
+        # clip ever comes back.
+        if os.path.exists(poster) and _remove_tree(poster, tries=tries, delay=delay):
             removed.append(os.path.basename(poster))
-    clip_state.forget(job_id, index)
-    return removed
+    # Keep the flags while a file survives, or a retry would lose "used"/
+    # "archived" and the card would come back as a fresh, unmarked clip.
+    if not blocked:
+        clip_state.forget(job_id, index)
+    return removed, blocked
+
+
+def _gallery_files_in_use_error(blocked) -> str:
+    names = ", ".join(blocked[:3]) + ("…" if len(blocked) > 3 else "")
+    return ("The file is still open in another program (the clip player or a "
+            f"download manager): {names}. Close it and try again.")
 
 
 def _valid_gallery_ref(job_id, index) -> bool:
@@ -10639,13 +10800,20 @@ async def delete_gallery_clip(job_id: str, index: int):
         raise HTTPException(status_code=400, detail="Invalid clip")
     if index >= _job_clip_count(job_id):
         raise HTTPException(status_code=404, detail="Clip not found")
-    removed = await asyncio.to_thread(_delete_gallery_clip_files, job_id, index)
+    removed, blocked = await asyncio.to_thread(_delete_gallery_clip_files, job_id, index)
+    if blocked:
+        raise HTTPException(status_code=409, detail=_gallery_files_in_use_error(blocked))
     return {"deleted": 1 if removed else 0, "files": removed}
 
 
 @app.post("/api/gallery/delete")
 async def delete_gallery_clips(request: Request):
-    """Bulk delete: ``{"clips": [{"job_id": "...", "index": 0}, ...]}``."""
+    """Bulk delete: ``{"clips": [{"job_id": "...", "index": 0}, ...]}``.
+
+    A file locked by a player or download manager does not abort the whole
+    batch: the rest go, and ``failed`` names the refs that stayed so the
+    dashboard can keep just those in the confirmation dialog.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -10669,18 +10837,20 @@ async def delete_gallery_clips(request: Request):
         refs.append((job_id, index))
 
     def clean():
-        deleted, files = 0, []
+        deleted, files, failed = 0, [], []
         for job_id, index in refs:
             if index >= _job_clip_count(job_id):
                 continue
-            gone = _delete_gallery_clip_files(job_id, index)
-            if gone:
+            gone, blocked = _delete_gallery_clip_files(job_id, index, wait=False)
+            if blocked:
+                failed.append({"job_id": job_id, "index": index, "files": blocked})
+            elif gone:
                 deleted += 1
                 files.extend(gone)
-        return deleted, files
+        return deleted, files, failed
 
-    deleted, files = await asyncio.to_thread(clean)
-    return {"deleted": deleted, "files": files}
+    deleted, files, failed = await asyncio.to_thread(clean)
+    return {"deleted": deleted, "files": files, "failed": failed}
 
 
 

@@ -7,6 +7,7 @@ happen before the page is cut, and "archive all used" is one call.
 """
 import json
 import os
+import time
 
 import pytest
 
@@ -295,8 +296,13 @@ class TestGalleryPosters:
                   if c["job_id"] == "job-a" and c["index"] == 0)
         assert a0["poster"] == "/videos/job-a/poster_clip_1.jpg"
 
-    def test_a_missing_poster_is_written_once_and_reused(self, gallery, monkeypatch):
+    def test_a_missing_poster_is_written_once_and_reused(self, gallery, monkeypatch, tmp_path):
         app_module = pytest.importorskip("app")
+        # The fixture's clips are placeholders too small to extract from; make
+        # these three look like real renders (the ffmpeg call is faked below).
+        for job_id in ("job-a", "job-b"):
+            for clip in (tmp_path / "videos" / job_id).glob("*clip_*.mp4"):
+                clip.write_bytes(b"x" * (20 * 1024))
         calls = []
 
         def fake_run(cmd, **kwargs):
@@ -323,4 +329,139 @@ class TestGalleryPosters:
         assert res.status_code == 200
         assert "poster_clip_1.jpg" in res.json()["files"]
         assert not poster.exists()
+
+
+def _set_durations(tmp_path, job_id, durations):
+    meta = tmp_path / "videos" / job_id / f"{job_id}_metadata.json"
+    data = json.loads(meta.read_text())
+    for clip, seconds in zip(data["shorts"], durations):
+        clip["end"] = clip["start"] + seconds
+    meta.write_text(json.dumps(data))
+
+
+def _set_job_mtime(tmp_path, job_id, seconds_ago):
+    when = time.time() - seconds_ago
+    meta = tmp_path / "videos" / job_id / f"{job_id}_metadata.json"
+    os.utime(meta, (when, when))
+
+
+class TestGalleryPagingAndFilters:
+    """Server-side paging and filters: they narrow the whole library, not the
+    page in hand (the old endpoint cut the page while it was still counting)."""
+
+    def test_pages_are_cut_by_the_server(self, gallery):
+        first = gallery.get("/api/gallery/clips?limit=1&page=1").json()
+        assert (first["page"], first["pages"], first["total"], first["offset"]) == (1, 3, 3, 0)
+        assert first["has_more"] is True
+
+        second = gallery.get("/api/gallery/clips?limit=1&page=2").json()
+        assert (second["page"], second["pages"], second["offset"]) == (2, 3, 1)
+        assert _titles(gallery.get("/api/gallery/clips?limit=1&page=2")) == ["A0"]
+
+        last = gallery.get("/api/gallery/clips?limit=1&page=3").json()
+        assert last["has_more"] is False
+
+    def test_a_page_past_the_end_is_clamped_not_an_error(self, gallery):
+        body = gallery.get("/api/gallery/clips?limit=2&page=99").json()
+        assert body["page"] == 2
+        assert body["pages"] == 2
+        assert len(body["clips"]) == 1
+
+    def test_offset_still_works_for_older_callers(self, gallery):
+        body = gallery.get("/api/gallery/clips?limit=1&offset=2").json()
+        assert (body["page"], body["offset"]) == (3, 2)
+
+    def test_sort_longest_and_oldest(self, gallery, tmp_path):
+        _set_durations(tmp_path, "job-a", [5, 40])
+        _set_durations(tmp_path, "job-b", [15])
+        assert _titles(gallery.get("/api/gallery/clips?sort=longest"))[:1] == ["A1"]
+        assert _titles(gallery.get("/api/gallery/clips?sort=shortest"))[:1] == ["A0"]
+        _set_job_mtime(tmp_path, "job-a", 3 * 86400)
+        _set_job_mtime(tmp_path, "job-b", 60)
+        assert _titles(gallery.get("/api/gallery/clips?sort=oldest"))[-1] == "B0"
+
+    def test_rendered_date_presets(self, gallery, tmp_path):
+        _set_job_mtime(tmp_path, "job-a", 2 * 86400)
+        _set_job_mtime(tmp_path, "job-b", 60)
+        assert _titles(gallery.get("/api/gallery/clips?date=today")) == ["B0"]
+        assert "B0" not in _titles(gallery.get("/api/gallery/clips?date=yesterday"))
+
+    def test_custom_date_range_is_inclusive_and_validated(self, gallery):
+        today = time.strftime("%Y-%m-%d")
+        body = gallery.get(f"/api/gallery/clips?date=custom&date_from={today}&date_to={today}").json()
+        assert body["total"] == 3
+        bad = gallery.get("/api/gallery/clips?date=custom&date_from=2026-13-01&date_to=2026-12-01")
+        assert bad.status_code == 400
+        backwards = gallery.get("/api/gallery/clips?date=custom&date_from=2026-12-02&date_to=2026-12-01")
+        assert backwards.status_code == 400
+
+    def test_platform_filter_uses_the_separate_marks(self, gallery):
+        gallery.patch("/api/gallery/clip/job-a/0", json={"platform": "facebook", "posted": True})
+        gallery.patch("/api/gallery/clip/job-b/0", json={"platform": "youtube", "posted": True})
+        assert _titles(gallery.get("/api/gallery/clips?platform=facebook")) == ["A0"]
+        assert _titles(gallery.get("/api/gallery/clips?platform=youtube")) == ["B0"]
+        assert _titles(gallery.get("/api/gallery/clips?platform=both")) == []
+        assert _titles(gallery.get("/api/gallery/clips?platform=none")) == ["A1"]
+        counts = gallery.get("/api/gallery/clips?platform=youtube").json()["counts"]
+        assert counts == {"used": 1, "unused": 0, "archived": 0}
+
+    def test_search_matches_title_and_tags(self, gallery):
+        assert _titles(gallery.get("/api/gallery/clips?q=A1")) == ["A1"]
+        assert _titles(gallery.get("/api/gallery/clips?q=job-a")) == ["A0", "A1"]
+        assert gallery.get("/api/gallery/clips?q=nothing-here").json()["total"] == 0
+
+    def test_filters_and_paging_agree(self, gallery, tmp_path):
+        _set_durations(tmp_path, "job-a", [5, 40])
+        body = gallery.get("/api/gallery/clips?sort=longest&limit=1&page=2").json()
+        assert body["pages"] == 3
+        assert len(body["clips"]) == 1
+
+    def test_writing_a_poster_does_not_reorder_the_library(self, gallery, tmp_path):
+        # Posters live inside the job dir; the ordering must come from the
+        # metadata's mtime or viewing an old job would make it "newest".
+        before = _titles(gallery.get("/api/gallery/clips"))
+        (tmp_path / "videos" / "job-a" / "poster_clip_1.jpg").write_bytes(b"jpeg")
+        assert _titles(gallery.get("/api/gallery/clips")) == before
+
+    def test_a_date_filter_does_not_prune_marks_outside_the_window(self, gallery, tmp_path):
+        gallery.patch("/api/gallery/clip/job-a/0", json={"used": True})
+        _set_job_mtime(tmp_path, "job-a", 3 * 86400)
+        assert gallery.get("/api/gallery/clips?date=today").json()["total"] == 1
+        # The used clip was not in the result, but its mark must survive.
+        assert _titles(gallery.get("/api/gallery/clips?usage=used")) == ["A0"]
+
+
+class TestLockedClipDelete:
+    """Windows keeps a handle open while a player/download manager reads the
+    file. That must surface as "close it and retry", not as "already gone"."""
+
+    def test_single_delete_reports_the_file_in_use(self, gallery, monkeypatch, tmp_path):
+        app_module = pytest.importorskip("app")
+        monkeypatch.setattr(app_module, "_remove_tree", lambda *a, **k: False)
+        clip = tmp_path / "videos" / "job-a" / "job-a_clip_1.mp4"
+        res = gallery.delete("/api/gallery/clip/job-a/0")
+        assert res.status_code == 409
+        assert "still open" in res.json()["detail"]
+        assert clip.exists()
+
+    def test_bulk_delete_keeps_only_the_blocked_refs(self, gallery, monkeypatch, tmp_path):
+        app_module = pytest.importorskip("app")
+        monkeypatch.setattr(app_module, "_remove_tree", lambda *a, **k: False)
+        res = gallery.post("/api/gallery/delete", json={"clips": [
+            {"job_id": "job-a", "index": 0},
+            {"job_id": "job-b", "index": 0},
+        ]})
+        assert res.status_code == 200
+        body = res.json()
+        assert body["deleted"] == 0
+        assert {(f["job_id"], f["index"]) for f in body["failed"]} == {("job-a", 0), ("job-b", 0)}
+        assert (tmp_path / "videos" / "job-a" / "job-a_clip_1.mp4").exists()
+
+    def test_flags_survive_a_blocked_delete(self, gallery, monkeypatch):
+        app_module = pytest.importorskip("app")
+        gallery.patch("/api/gallery/clip/job-a/0", json={"used": True})
+        monkeypatch.setattr(app_module, "_remove_tree", lambda *a, **k: False)
+        assert gallery.delete("/api/gallery/clip/job-a/0").status_code == 409
+        assert _titles(gallery.get("/api/gallery/clips?usage=used")) == ["A0"]
+
 

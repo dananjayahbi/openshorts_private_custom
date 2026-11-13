@@ -107,6 +107,43 @@ def test_bulk_delete_is_behind_a_confirm_and_a_delete_button():
     assert "deleted" in gallery
 
 
+def test_pagination_is_server_side():
+    gallery = _read("components", "Gallery.jsx")
+    # The page number goes to the API; the client never accumulates pages.
+    assert "page: String(" in gallery
+    assert "goToPage" in gallery
+    assert "pageList" in gallery
+    assert "PAGE_SIZES" in gallery
+    assert "offset:" not in gallery
+    assert "IntersectionObserver" not in gallery
+
+
+def test_the_filters_are_sent_to_the_server():
+    gallery = _read("components", "Gallery.jsx")
+    assert "params.set('date'" in gallery
+    assert "date_from" in gallery and "date_to" in gallery
+    assert "params.set('q'" in gallery
+    assert "platform: filters.platform" in gallery
+    assert "sort: filters.sort" in gallery
+    # Rendered-date presets and the sort choices the user asked for.
+    for preset in ("today", "yesterday", "week", "month", "custom"):
+        assert f"value: '{preset}'" in gallery
+    for order in ("newest", "oldest", "longest", "shortest", "score"):
+        assert f"value: '{order}'" in gallery
+    # Platform state is the per-platform mark, not just the used flag.
+    for platform in ("youtube", "facebook", "both", "none"):
+        assert f"value: '{platform}'" in gallery
+
+
+def test_a_locked_file_is_explained_in_the_dialog():
+    modal = _read("components", "ConfirmDeleteModal.jsx")
+    gallery = _read("components", "Gallery.jsx")
+    assert "failed" in gallery
+    assert "still open" in gallery
+    # The message lands in the dialog, not only in the page banner.
+    assert "error" in modal and "role=\"alert\"" in modal
+
+
 def test_no_inline_metadata_wall_on_the_card():
     card = _read("components", "GalleryCard.jsx")
     for gone in ("handleCopy", "YouTube Title", "TikTok · IG Caption", "line-clamp-3"):
