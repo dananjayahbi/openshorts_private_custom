@@ -43,8 +43,9 @@ def test_settings_scroller_is_full_width():
     scroller = [line for line in app.splitlines()
                 if "w-full overflow-y-auto overscroll-contain" in line]
     assert scroller, "Settings' scroll container must span the window"
-    # The reading column is capped inside the scroller, not on it.
-    assert "max-w-2xl mx-auto p-4 sm:p-8" in app
+    # The reading column inside is full width too: pages are not letterboxed.
+    assert 'className="w-full p-3 sm:p-6"' in app
+    assert "max-w-2xl mx-auto p-4" not in app
 
 
 def test_every_page_pane_contains_its_overscroll():
@@ -60,3 +61,16 @@ def test_youtube_studio_is_mounted():
     app = _read("App.jsx")
     assert "{activeTab === 'thumbnails' && (" in app
     assert "<ThumbnailStudio" in app
+
+
+def test_pages_are_full_width():
+    """No page is letterboxed inside a centered max-w container."""
+    app = _read("App.jsx")
+    for capped in ("max-w-6xl mx-auto", "max-w-5xl mx-auto",
+                   "max-w-4xl mx-auto", "max-w-2xl mx-auto"):
+        assert capped not in app, capped
+    for name in ("components/HomeDashboard.jsx", "components/Gallery.jsx",
+                 "components/ThumbnailStudio.jsx"):
+        src = _read(name)
+        assert "max-w-6xl mx-auto" not in src
+        assert "max-w-5xl mx-auto" not in src

@@ -103,7 +103,7 @@ export default function Gallery() {
     }
 
     return (
-        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-6 md:p-8 animate-fade">
+        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-3 sm:p-6 animate-fade">
             <div className="flex items-end justify-between mb-8">
                 <div>
                     <p className="eyebrow mb-1.5">Library</p>

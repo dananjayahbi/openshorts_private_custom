@@ -1830,7 +1830,7 @@ function App() {
                is capped. A capped scroller puts its scrollbar in the middle of
                the screen instead of at the window edge. */
             <div className="h-full w-full overflow-y-auto overscroll-contain animate-fade">
-              <div className="max-w-2xl mx-auto p-4 sm:p-8">
+              <div className="w-full p-3 sm:p-6">
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
                 <div>
                   <p className="eyebrow mb-1.5">08 · SETTINGS</p>
@@ -2066,8 +2066,8 @@ function App() {
 
           {/* View: AI Agent */}
           {activeTab === 'ai-agent' && (
-            <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
-              <div className="max-w-4xl mx-auto space-y-8">
+            <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-3 sm:p-6 animate-fade">
+              <div className="w-full space-y-8">
 
                 {/* Header */}
                 <div className="space-y-3">
@@ -2230,7 +2230,7 @@ function App() {
               {/* On a phone the hero used to fill the fold on its own and push
                   the uploader — the whole point of the screen — below it. The
                   eyebrow, the display size and the gaps all shrink first. */}
-              <div className="max-w-xl w-full text-center space-y-5 sm:space-y-8">
+              <div className="w-full text-center space-y-5 sm:space-y-8">
                 <div className="space-y-2.5 sm:space-y-4">
                   <p className="eyebrow hidden sm:block">01 · CLIP GENERATOR</p>
                   <h1 className="font-display lowercase text-3xl sm:text-4xl md:text-5xl text-ink">
