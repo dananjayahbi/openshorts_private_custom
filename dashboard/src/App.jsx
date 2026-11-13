@@ -1713,7 +1713,7 @@ function App() {
         <span className="font-display lowercase text-lg text-ink hidden xs:block sm:block">clip studio</span>
       </a>
 
-      <nav className="hidden md:flex items-center gap-0.5 min-w-0">
+      <nav className="hidden md:flex items-center gap-0.5 min-w-0 overflow-x-auto no-scrollbar">
         {navItems.map((item) => {
           const NavIcon = item.icon;
           const isActive = activeTab === item.id;
@@ -1724,7 +1724,7 @@ function App() {
               onClick={() => goToTab(item.id)}
               title={tabLocked(item.id) ? 'Finish your first clips to unlock' : item.label}
               disabled={tabLocked(item.id)}
-              className={`relative flex items-center gap-2 px-3 py-2 rounded-input text-sm transition-colors whitespace-nowrap ${isActive
+              className={`relative flex h-14 items-center gap-2 px-3 text-sm transition-colors whitespace-nowrap shrink-0 ${isActive
                 ? 'bg-paper3 text-ink'
                 : 'text-muted hover:text-ink2 hover:bg-paper3/60'
                 } ${tabLocked(item.id) ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-muted' : ''}`}
@@ -1733,7 +1733,7 @@ function App() {
               <span className="lowercase">{item.label}</span>
               {item.byok && !isActive && <span className="readout hidden lg:block">byok</span>}
               {isActive && (
-                <span className="absolute left-3 right-3 -bottom-[13px] h-[2px] bg-brass rounded-full" aria-hidden="true" />
+                <span className="absolute left-3 right-3 bottom-0 h-[2px] bg-brass rounded-full" aria-hidden="true" />
               )}
             </button>
           );

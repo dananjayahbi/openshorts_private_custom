@@ -105,7 +105,25 @@ transient error in video 2 does not repeat videos 1–4.
 | API | `GET/POST /api/collector`, `POST /api/collector/upload`, `POST /api/collector/{id}/download`, `POST /api/collector/{id}/queue`, `DELETE /api/collector/{id}` |
 | Processing | `POST /api/process` accepts `collector_id`; a downloaded file is hardlinked into the job, so the collector keeps its copy |
 
-## Clip Gallery — used / archived
+## Clip Gallery: compact tiles, a full-viewport player, delete
+
+The library is a grid of small square posters (the viral score top-left, the
+platform marks and duration bottom-right, the title under it). A tile does not
+play inline: clicking it opens a full-viewport modal with the real player, the
+score, the tags, the YouTube title and both captions (each with a copy button),
+the Facebook/YouTube marks, archive and **delete**. Escape or the backdrop
+closes it.
+
+- **Delete** — the hover trash on a tile, or the modal's delete, removes every
+  file of that clip (clean cut, captioned/subtitled and watermark twins, layout
+  sidecar), its review state key, and the card. **select** enters selection
+  mode (checkboxes, select all); **delete (n)** removes the selected clips in
+  one call. The job's metadata entry stays so the remaining clips keep their
+  index/file pairing; the gallery skips an index with no file.
+- API: `DELETE /api/gallery/clip/{job_id}/{index}` and
+  `POST /api/gallery/delete {"clips": [...]}` (validated, max 200).
+- The score is the moment picker's `predicted_score`, unchanged since the clip
+  was chosen.
 
 Each clip card shows the **viral score** the moment picker predicted and its
 **five tags** (`tags` in the job's metadata, comma-separated, one copy button).
@@ -115,7 +133,7 @@ deduped) and tops it up from the clip's own hashtags/title so every clip has
 exactly five. Clips rendered before the field existed get five derived from
 their title/description on read, without rewriting old metadata.
 
-Each card has two pieces of review state, stored in
+Each clip has two pieces of review state, stored in
 `Storage/clip_state.json` (keyed `<job_id>:<index>`, so a re-render that renames
 the file keeps them):
 
@@ -137,8 +155,8 @@ scroll agree. `PATCH /api/gallery/clip/{job_id}/{index}` sets the flags;
 `POST /api/gallery/archive-used` archives the used ones. Stale keys for deleted
 jobs are pruned on the next scan.
 
-The cards follow the clip's real aspect ratio (9:16, 1:1 or 16:9), and native
-fullscreen letterboxes with `object-fit: contain` instead of cropping.
+The modal player letterboxes the clip with `object-fit: contain` instead of
+cropping it, so a 16:9 or 1:1 render is shown in full.
 
 ## Storage numbers
 

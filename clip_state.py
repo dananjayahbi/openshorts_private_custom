@@ -189,6 +189,16 @@ def forget_job(job_id):
         return len(data) - len(kept)
 
 
+def forget(job_id, index):
+    """Drop one clip's entry (the clip file was deleted from the gallery)."""
+    with _lock:
+        data = _read()
+        if data.pop(_key(job_id, index), None) is None:
+            return False
+        _write(data)
+        return True
+
+
 def prune(known_keys):
     """Drop entries whose job/clip no longer exists (called on gallery scans)."""
     known = {_key(j, i) for j, i in known_keys}

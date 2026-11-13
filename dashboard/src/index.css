@@ -207,6 +207,16 @@
   background: transparent;
 }
 
+/* A row that scrolls (the desktop nav at narrow widths) without showing a
+   scrollbar in the header. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background: var(--color-rule-2);
   border-radius: 10px;

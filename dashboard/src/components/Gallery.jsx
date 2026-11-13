@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { AlertCircle, Loader2, Archive } from 'lucide-react';
+import {
+    AlertCircle, Archive, CheckCircle2, Circle, Loader2, Trash2, X,
+} from 'lucide-react';
 import { getApiUrl } from '../config';
 import GalleryCard from './GalleryCard';
+import ClipModal from './ClipModal';
 
-const CLIPS_PER_PAGE = 20;
+const CLIPS_PER_PAGE = 24;
 
 // One tab = one server-side filter, so the page counts and the infinite scroll
 // agree with what is on screen (filtering after a page was cut made it lie).
@@ -15,17 +18,26 @@ const TABS = [
 ];
 
 const bucketOf = (flags) => (flags.archived ? 'archived' : flags.used ? 'used' : 'unused');
+const keyOf = (clip) => `${clip.job_id}:${clip.index}`;
 
 export default function Gallery() {
     const [clips, setClips] = useState([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState(null);
+    const [actionError, setActionError] = useState('');
     const [hasMore, setHasMore] = useState(true);
     const [offset, setOffset] = useState(0);
     const [tab, setTab] = useState('library');
     const [counts, setCounts] = useState({ used: 0, unused: 0, archived: 0 });
     const [archiving, setArchiving] = useState(false);
+    // Full-viewport player: cards are posters, this is the only place a clip
+    // plays (and where its copy/platforms are edited).
+    const [active, setActive] = useState(null);
+    // Selection mode drives bulk delete.
+    const [selectMode, setSelectMode] = useState(false);
+    const [selected, setSelected] = useState(() => new Set());
+    const [deleting, setDeleting] = useState(false);
 
     const loaderRef = useRef(null);
     const activeTab = TABS.find((t) => t.id === tab) || TABS[0];
@@ -70,6 +82,8 @@ export default function Gallery() {
         setClips([]);
         setOffset(0);
         setHasMore(true);
+        setSelected(new Set());
+        setSelectMode(false);
         fetchClips(0, false);
     }, [fetchClips]);
 
@@ -98,8 +112,8 @@ export default function Gallery() {
         };
     }, [hasMore, loadingMore, loading, offset, fetchClips]);
 
-    // A clip that changed stay on screen only while it still matches the tab;
-    // the counts move with it either way.
+    // A clip that changed stays only while it still matches the tab; the counts
+    // move with it either way.
     const handleChanged = (clip, flags) => {
         setCounts((prev) => {
             const next = { ...prev };
@@ -112,11 +126,16 @@ export default function Gallery() {
             : !flags.archived)
             && (activeTab.usage === 'any'
                 || (activeTab.usage === 'used' ? flags.used : !flags.used));
-        setClips((prev) => (
-            stillMatches
-                ? prev.map((c) => (c.job_id === clip.job_id && c.index === clip.index ? { ...c, ...flags } : c))
-                : prev.filter((c) => !(c.job_id === clip.job_id && c.index === clip.index))
-        ));
+        const merged = { ...clip, ...flags };
+        setClips((prev) => {
+            if (flags.archived && activeTab.view !== 'archived' && activeTab.view !== 'all') {
+                return prev.filter((c) => keyOf(c) !== keyOf(clip));
+            }
+            return stillMatches
+                ? prev.map((c) => (keyOf(c) === keyOf(clip) ? merged : c))
+                : prev.filter((c) => keyOf(c) !== keyOf(clip));
+        });
+        setActive((current) => (current && keyOf(current) === keyOf(clip) ? merged : current));
     };
 
     const archiveAllUsed = async () => {
@@ -131,6 +150,50 @@ export default function Gallery() {
             setError(String(e.message || e).slice(0, 200));
         } finally {
             setArchiving(false);
+        }
+    };
+
+    const toggleSelected = (clip) => {
+        const key = keyOf(clip);
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    };
+
+    const deleteClips = async (targets) => {
+        if (!targets.length || deleting) return;
+        const label = targets.length === 1
+            ? `"${targets[0].title}"`
+            : `${targets.length} clips`;
+        if (!window.confirm(
+            `Delete ${label}? The rendered file(s) are removed from disk and cannot be recovered.`)) return;
+        setDeleting(true);
+        setActionError('');
+        try {
+            const res = await fetch(getApiUrl('/api/gallery/delete'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    clips: targets.map((c) => ({ job_id: c.job_id, index: c.index })),
+                }),
+            });
+            if (!res.ok) throw new Error((await res.text()).slice(0, 240) || `HTTP ${res.status}`);
+            const data = await res.json();
+            setSelected(new Set());
+            setSelectMode(false);
+            setActive((current) => (
+                current && targets.some((c) => keyOf(c) === keyOf(current)) ? null : current));
+            if (!data.deleted) {
+                setActionError('Nothing was deleted — the files were already gone.');
+            }
+            await fetchClips(0, false);
+        } catch (e) {
+            setActionError(String(e.message || e).slice(0, 240));
+        } finally {
+            setDeleting(false);
         }
     };
 
@@ -169,92 +232,156 @@ export default function Gallery() {
         return counts.archived;
     };
 
+    const selectedClips = clips.filter((c) => selected.has(keyOf(c)));
+    const allSelected = clips.length > 0 && selectedClips.length === clips.length;
+
     return (
-        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-3 sm:p-6 animate-fade">
-            <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
-                <div>
-                    <p className="eyebrow mb-1.5">Library</p>
-                    <h1 className="font-display lowercase text-2xl text-ink">Clip Gallery</h1>
-                </div>
-                <div className="flex items-center gap-2">
-                    {counts.used > 0 && tab !== 'archived' && (
-                        <button
-                            type="button"
-                            onClick={archiveAllUsed}
-                            disabled={archiving}
-                            className="btn-quiet text-xs py-1.5 px-2.5"
-                            title="Archive every clip marked used"
-                        >
-                            {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
-                            archive used ({counts.used})
-                        </button>
-                    )}
-                    <span className="readout">
-                        {clips.length} {clips.length === 1 ? 'Clip' : 'Clips'}{hasMore ? '+' : ''}
-                    </span>
-                </div>
-            </div>
-
-            <div className="flex gap-1 mb-5 border-b border-rule overflow-x-auto">
-                {TABS.map((t) => {
-                    const active = t.id === tab;
-                    return (
-                        <button
-                            key={t.id}
-                            type="button"
-                            onClick={() => setTab(t.id)}
-                            className={`relative pb-2.5 px-2.5 text-sm lowercase whitespace-nowrap border-b-2 -mb-px transition-colors flex items-center gap-1.5 ${active
-                                ? 'text-ink border-brass'
-                                : 'text-muted border-transparent hover:text-ink2'}`}
-                        >
-                            {t.label}
-                            <span className={`readout ${active ? 'text-brass' : ''}`}>{tabCount(t.id)}</span>
-                        </button>
-                    );
-                })}
-            </div>
-
-            {clips.length === 0 ? (
-                <div className="text-center py-20 text-muted">
-                    {tab === 'archived' ? (
-                        <>
-                            <p className="text-lg mb-2 lowercase">Nothing archived.</p>
-                            <p className="text-sm lowercase">Archive clips you are done with; the files stay on disk.</p>
-                        </>
-                    ) : (
-                        <>
-                            <p className="text-lg mb-2 lowercase">No clips found yet.</p>
-                            <p className="text-sm lowercase">Process some videos to populate your gallery!</p>
-                        </>
-                    )}
-                </div>
-            ) : (
-                <>
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6 pb-10">
-                        {clips.map((clip) => (
-                            <GalleryCard
-                                key={`${clip.job_id}-${clip.index}`}
-                                clip={clip}
-                                onChanged={handleChanged}
-                            />
-                        ))}
+        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
+            <div className="w-full p-3 sm:p-6">
+                <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+                    <div>
+                        <p className="eyebrow mb-1.5">Library</p>
+                        <h1 className="font-display lowercase text-2xl text-ink">Clip Gallery</h1>
                     </div>
+                    <div className="flex items-center gap-2">
+                        {counts.used > 0 && tab !== 'archived' && (
+                            <button
+                                type="button"
+                                onClick={archiveAllUsed}
+                                disabled={archiving}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                                title="Archive every clip marked used"
+                            >
+                                {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                                archive used ({counts.used})
+                            </button>
+                        )}
+                        <span className="readout">
+                            {clips.length}{hasMore ? '+' : ''} shown · {counts.used + counts.unused + counts.archived} total
+                        </span>
+                    </div>
+                </div>
 
-                    {/* Infinite scroll loader trigger */}
-                    {hasMore && (
-                        <div
-                            ref={loaderRef}
-                            className="flex justify-center py-8"
-                        >
-                            {loadingMore && (
-                                <div className="flex items-center gap-2 text-muted">
-                                    <Loader2 size={20} className="animate-spin" />
-                                    <span className="text-sm lowercase">Loading more clips...</span>
-                                </div>
-                            )}
-                        </div>
+                <div className="flex gap-1 mb-4 border-b border-rule overflow-x-auto">
+                    {TABS.map((t) => {
+                        const activeButton = t.id === tab;
+                        return (
+                            <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => setTab(t.id)}
+                                className={`relative pb-2.5 px-2.5 text-sm lowercase whitespace-nowrap border-b-2 -mb-px transition-colors flex items-center gap-1.5 ${activeButton
+                                    ? 'text-ink border-brass'
+                                    : 'text-muted border-transparent hover:text-ink2'}`}
+                            >
+                                {t.label}
+                                <span className={`readout ${activeButton ? 'text-brass' : ''}`}>{tabCount(t.id)}</span>
+                            </button>
+                        );
+                    })}
+                </div>
+
+                {/* Select / bulk delete toolbar */}
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSelectMode((v) => !v);
+                            setSelected(new Set());
+                        }}
+                        className={`btn-quiet text-xs py-1.5 px-2.5 ${selectMode ? 'text-brass' : ''}`}
+                    >
+                        {selectMode ? <X size={13} /> : <CheckCircle2 size={13} />}
+                        {selectMode ? 'cancel selection' : 'select'}
+                    </button>
+                    {selectMode && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => setSelected(allSelected
+                                    ? new Set()
+                                    : new Set(clips.map(keyOf)))}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                            >
+                                {allSelected ? <Circle size={13} /> : <CheckCircle2 size={13} />}
+                                {allSelected ? 'clear all' : 'select all'}
+                            </button>
+                            <span className="readout">{selected.size} selected</span>
+                            <button
+                                type="button"
+                                onClick={() => deleteClips(selectedClips)}
+                                disabled={!selected.size || deleting}
+                                className="btn-quiet text-xs py-1.5 px-2.5 text-danger"
+                            >
+                                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                                delete ({selected.size})
+                            </button>
+                        </>
                     )}
-                </>
+                    <span className="ml-auto readout hidden sm:inline">click a clip to play</span>
+                </div>
+
+                {actionError && (
+                    <div className="mb-3 rounded-card border border-danger/40 px-3 py-2 text-xs text-danger flex items-center gap-2">
+                        <AlertCircle size={13} /> {actionError}
+                        <button type="button" onClick={() => setActionError('')} className="ml-auto" aria-label="Dismiss">
+                            <X size={13} />
+                        </button>
+                    </div>
+                )}
+
+                {clips.length === 0 ? (
+                    <div className="text-center py-20 text-muted">
+                        {tab === 'archived' ? (
+                            <>
+                                <p className="text-lg mb-2 lowercase">Nothing archived.</p>
+                                <p className="text-sm lowercase">Archive clips you are done with; the files stay on disk.</p>
+                            </>
+                        ) : (
+                            <>
+                                <p className="text-lg mb-2 lowercase">No clips found yet.</p>
+                                <p className="text-sm lowercase">Process some videos to populate your gallery!</p>
+                            </>
+                        )}
+                    </div>
+                ) : (
+                    <>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 gap-2.5 sm:gap-3 pb-10">
+                            {clips.map((clip) => (
+                                <GalleryCard
+                                    key={keyOf(clip)}
+                                    clip={clip}
+                                    selectMode={selectMode}
+                                    selected={selected.has(keyOf(clip))}
+                                    onToggleSelect={toggleSelected}
+                                    onOpen={setActive}
+                                    onDelete={(c) => deleteClips([c])}
+                                />
+                            ))}
+                        </div>
+
+                        {/* Infinite scroll loader trigger */}
+                        {hasMore && (
+                            <div ref={loaderRef} className="flex justify-center py-8">
+                                {loadingMore && (
+                                    <div className="flex items-center gap-2 text-muted">
+                                        <Loader2 size={20} className="animate-spin" />
+                                        <span className="text-sm lowercase">Loading more clips...</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </>
+                )}
+            </div>
+
+            {active && (
+                <ClipModal
+                    clip={active}
+                    onClose={() => setActive(null)}
+                    onChanged={handleChanged}
+                    onDelete={(c) => deleteClips([c])}
+                />
             )}
         </div>
     );

@@ -10523,6 +10523,85 @@ async def archive_used_clips():
     return {"archived": archived}
 
 
+def _delete_gallery_clip_files(job_id: str, index: int) -> list:
+    """Delete one clip's rendered file(s) and its review state.
+
+    Every file for that index goes (the clean cut, its captioned/subtitled
+    twin, the watermark twin and the layout sidecar): leaving one behind would
+    make the card come back with the wrong copy. The metadata entry stays, so
+    the other clips keep their index/file pairing; the gallery skips an index
+    with no file, which is exactly what a deleted clip is.
+    """
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    removed = []
+    if os.path.isdir(job_dir):
+        for path in glob.glob(os.path.join(job_dir, f"*clip_{index + 1}.mp4*")):
+            if _remove_tree(path):
+                removed.append(os.path.basename(path))
+    clip_state.forget(job_id, index)
+    return removed
+
+
+def _valid_gallery_ref(job_id, index) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", str(job_id or "")):
+        return False
+    try:
+        return int(index) >= 0
+    except (TypeError, ValueError):
+        return False
+
+
+@app.delete("/api/gallery/clip/{job_id}/{index}")
+async def delete_gallery_clip(job_id: str, index: int):
+    """Delete one rendered clip from disk (the gallery card disappears)."""
+    if not _valid_gallery_ref(job_id, index):
+        raise HTTPException(status_code=400, detail="Invalid clip")
+    if index >= _job_clip_count(job_id):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    removed = await asyncio.to_thread(_delete_gallery_clip_files, job_id, index)
+    return {"deleted": 1 if removed else 0, "files": removed}
+
+
+@app.post("/api/gallery/delete")
+async def delete_gallery_clips(request: Request):
+    """Bulk delete: ``{"clips": [{"job_id": "...", "index": 0}, ...]}``."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected a JSON body")
+    clips = body.get("clips") if isinstance(body, dict) else None
+    if not isinstance(clips, list) or not clips:
+        raise HTTPException(status_code=400, detail="clips must be a non-empty list")
+    if len(clips) > 200:
+        raise HTTPException(status_code=400, detail="Too many clips in one delete")
+    refs = []
+    for item in clips:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="each clip must be an object")
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="index must be an integer")
+        job_id = str(item.get("job_id") or "")
+        if not _valid_gallery_ref(job_id, index):
+            raise HTTPException(status_code=400, detail=f"Invalid clip {job_id}:{index}")
+        refs.append((job_id, index))
+
+    def clean():
+        deleted, files = 0, []
+        for job_id, index in refs:
+            if index >= _job_clip_count(job_id):
+                continue
+            gone = _delete_gallery_clip_files(job_id, index)
+            if gone:
+                deleted += 1
+                files.extend(gone)
+        return deleted, files
+
+    deleted, files = await asyncio.to_thread(clean)
+    return {"deleted": deleted, "files": files}
+
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # SaaSShorts: AI UGC Video Generator for SaaS Products

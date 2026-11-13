@@ -65,7 +65,11 @@ def test_the_gallery_and_mcp_expose_tags():
     mcp_py = open(os.path.join(repo, "mcp_server.py"), encoding="utf-8").read()
     card = open(os.path.join(repo, "dashboard", "src", "components", "GalleryCard.jsx"),
                 encoding="utf-8").read()
+    modal = open(os.path.join(repo, "dashboard", "src", "components", "ClipModal.jsx"),
+                 encoding="utf-8").read()
     assert '"tags"' in app_py
-    assert '"tags": clip.get("tags") or clip_tags.five' in app_py
+    assert 'clip.get("tags") or clip_tags.five(' in app_py
     assert '"tags": clip.get("tags") or ""' in mcp_py
-    assert "clip.tags" in card and "Tags" in card
+    # The tags are shown (and copyable) in the full clip view.
+    assert "clip.tags" in modal and "tags" in modal.lower()
+    assert "GalleryCard" in card

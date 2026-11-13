@@ -198,6 +198,56 @@ class TestGalleryApi:
         for key in ("platforms", "platform_times", "used", "archived"):
             assert key in clip
 
+    def test_delete_one_clip_removes_its_files_and_state(self, gallery, tmp_path, monkeypatch):
+        import storage as storage_mod
+        job_dir = tmp_path / "videos" / "job-a"
+        # Every copy of that index goes: raw, captioned and watermark twins.
+        (job_dir / "subtitled_job-a_clip_1.mp4").write_bytes(b"x")
+        (job_dir / "wm_job-a_clip_1.mp4").write_bytes(b"x")
+        (job_dir / "job-a_clip_1.mp4.layout.json").write_text("{}")
+        monkeypatch.setattr(storage_mod, "STORAGE_DIR", str(tmp_path))
+        clip_state.set_flags("job-a", 0, platforms={"youtube": True})
+
+        res = gallery.delete("/api/gallery/clip/job-a/0")
+
+        assert res.status_code == 200
+        assert res.json()["deleted"] == 1
+        assert not (job_dir / "job-a_clip_1.mp4").exists()
+        assert not (job_dir / "subtitled_job-a_clip_1.mp4").exists()
+        assert not (job_dir / "wm_job-a_clip_1.mp4").exists()
+        assert not (job_dir / "job-a_clip_1.mp4.layout.json").exists()
+        # The other clip of the same job is untouched.
+        assert (job_dir / "job-a_clip_2.mp4").exists()
+        assert clip_state.flags("job-a", 0)["used"] is False
+        # The gallery no longer lists index 0.
+        assert "A0" not in _titles(gallery.get("/api/gallery/clips?view=all"))
+
+    def test_delete_missing_or_invalid_clip(self, gallery):
+        assert gallery.delete("/api/gallery/clip/job-a/9").status_code == 404
+        assert gallery.delete("/api/gallery/clip/../x/0").status_code in (400, 404)
+
+    def test_bulk_delete_and_idempotency(self, gallery, tmp_path):
+        res = gallery.post("/api/gallery/delete", json={"clips": [
+            {"job_id": "job-a", "index": 0},
+            {"job_id": "job-a", "index": 1},
+        ]})
+        assert res.status_code == 200
+        assert res.json()["deleted"] == 2
+        assert _titles(gallery.get("/api/gallery/clips?view=all")) == ["B0"]
+
+        # Running it again deletes nothing (the files are gone), not a 500.
+        again = gallery.post("/api/gallery/delete", json={"clips": [
+            {"job_id": "job-a", "index": 0},
+        ]})
+        assert again.status_code == 200
+        assert again.json()["deleted"] == 0
+
+    def test_bulk_delete_validates_every_reference(self, gallery):
+        assert gallery.post("/api/gallery/delete", json={"clips": []}).status_code == 400
+        bad = gallery.post("/api/gallery/delete", json={"clips": [
+            {"job_id": "job-a", "index": "nope"}]})
+        assert bad.status_code == 400
+
     def test_archive_moves_a_clip_out_of_the_library(self, gallery):
         gallery.patch("/api/gallery/clip/job-a/1", json={"archived": True})
 
