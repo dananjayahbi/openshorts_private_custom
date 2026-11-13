@@ -21,6 +21,7 @@ const SAMPLE_TEXT = 'this is how your captions will look on the clip';
 export default function Playground({ initialProfile = null, onSaved, onOpenProfiles }) {
     const [style, setStyle] = useState(DEFAULT_CAPTION_STYLE);
     const [outputFormat, setOutputFormat] = useState('vertical');
+    const [layout, setLayout] = useState('auto');
     const [autoHook, setAutoHook] = useState(false);
     const [autoHookStyle, setAutoHookStyle] = useState('pill');
     const [playing, setPlaying] = useState(true);
@@ -52,6 +53,7 @@ export default function Playground({ initialProfile = null, onSaved, onOpenProfi
         setStyle({ ...DEFAULT_CAPTION_STYLE, ...(initialProfile.caption || {}) });
         const output = initialProfile.output || {};
         setOutputFormat(output.output_format || 'vertical');
+        setLayout((output.layouts && output.layouts[0]) || 'auto');
         setAutoHook(!!output.auto_hook);
         setAutoHookStyle(output.auto_hook_style || 'pill');
     }, [initialProfile]);
@@ -72,6 +74,7 @@ export default function Playground({ initialProfile = null, onSaved, onOpenProfi
         setStyle({ ...DEFAULT_CAPTION_STYLE, ...(profile.caption || {}) });
         const output = profile.output || {};
         setOutputFormat(output.output_format || 'vertical');
+        setLayout((output.layouts && output.layouts[0]) || 'auto');
         setAutoHook(!!output.auto_hook);
         setAutoHookStyle(output.auto_hook_style || 'pill');
     };
@@ -90,6 +93,7 @@ export default function Playground({ initialProfile = null, onSaved, onOpenProfi
                 caption: style,
                 output: {
                     output_format: outputFormat,
+                    layouts: layout === 'auto' ? [] : [layout],
                     auto_hook: autoHook,
                     auto_hook_style: autoHookStyle,
                 },
@@ -222,6 +226,19 @@ export default function Playground({ initialProfile = null, onSaved, onOpenProfi
                                     ))}
                                 </select>
                             )}
+                            <label className="block">
+                                <span className="eyebrow">reframe layout</span>
+                                <select
+                                    value={layout}
+                                    onChange={(e) => setLayout(e.target.value)}
+                                    className="input-field mt-1 text-sm"
+                                >
+                                    <option value="auto">Auto (AI picks per video)</option>
+                                    <option value="split">Two speakers stacked</option>
+                                    <option value="screencast">Screen over presenter</option>
+                                    <option value="none">Single crop only</option>
+                                </select>
+                            </label>
                         </div>
                     </div>
 

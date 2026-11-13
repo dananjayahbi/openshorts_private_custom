@@ -178,7 +178,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         setCaptionStyle({ ...DEFAULT_CAPTION_STYLE, ...(profile.caption || {}) });
         const output = profile.output || {};
         if (output.output_format) setOutputFormat(output.output_format);
-        if (Array.isArray(output.layouts) && output.layouts.length) setLayout(output.layouts[0]);
+        if (Array.isArray(output.layouts)) setLayout(output.layouts[0] || 'auto');
         if (typeof output.auto_hook === 'boolean') setAutoHook(output.auto_hook);
         if (output.auto_hook_style) setAutoHookStyle(output.auto_hook_style);
         if (output.target_clips) setTargetClips(String(output.target_clips));
