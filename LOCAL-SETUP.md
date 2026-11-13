@@ -123,11 +123,18 @@ player now loads video bytes. `ffmpeg` failures are quiet (the tile keeps its
 empty frame; the clip still opens), and a missing poster is made once per page
 and reused on every later request.
 
-- **Delete** — the hover trash on a tile, or the modal's delete, removes every
-  file of that clip (clean cut, captioned/subtitled and watermark twins, layout
-  sidecar, poster JPEG), its review state key, and the card. **select** enters
-  selection mode (checkboxes, select all); **delete (n)** removes the selected
-  clips in one call. The job's metadata entry stays so the remaining clips keep
+- **Delete** — the hover trash on a tile, or the modal's delete, opens an
+  in-app confirmation (`ConfirmDeleteModal`) instead of `window.confirm`,
+  which is unstyleable and is silently suppressed in some in-app browsers.
+  It names the clip(s), warns that every rendered file is removed for good,
+  and puts focus on **keep it**; Escape (captured before the player's own
+  Escape handler) or the backdrop cancels, a failed delete keeps the dialog
+  open with the error, and the dialog stacks above the clip player. Confirming
+  removes every file of that clip (clean cut, captioned/subtitled and
+  watermark twins, layout sidecar, poster JPEG), its review state key, and the
+  card. **select** enters selection mode (checkboxes, select all);
+  **delete (n)** opens the same dialog for the selected clips and removes them
+  in one call. The job's metadata entry stays so the remaining clips keep
   their index/file pairing; the gallery skips an index with no file.
 - API: `DELETE /api/gallery/clip/{job_id}/{index}` and
   `POST /api/gallery/delete {"clips": [...]}` (validated, max 200).

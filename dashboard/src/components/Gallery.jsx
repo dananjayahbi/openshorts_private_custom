@@ -5,6 +5,7 @@ import {
 import { getApiUrl } from '../config';
 import GalleryCard from './GalleryCard';
 import ClipModal from './ClipModal';
+import ConfirmDeleteModal from './ConfirmDeleteModal';
 
 const CLIPS_PER_PAGE = 24;
 
@@ -38,6 +39,10 @@ export default function Gallery() {
     const [selectMode, setSelectMode] = useState(false);
     const [selected, setSelected] = useState(() => new Set());
     const [deleting, setDeleting] = useState(false);
+    // Delete is confirmed in-app (ConfirmDeleteModal), not by window.confirm:
+    // the pending list is what that dialog describes and then deletes.
+    const [pendingDelete, setPendingDelete] = useState([]);
+    const [deleteError, setDeleteError] = useState('');
 
     const loaderRef = useRef(null);
     const activeTab = TABS.find((t) => t.id === tab) || TABS[0];
@@ -167,14 +172,23 @@ export default function Gallery() {
         });
     };
 
+    const requestDelete = (targets) => {
+        if (!targets?.length || deleting) return;
+        setActionError('');
+        setDeleteError('');
+        setPendingDelete(targets);
+    };
+
+    const cancelDelete = () => {
+        if (deleting) return;
+        setPendingDelete([]);
+        setDeleteError('');
+    };
+
     const deleteClips = async (targets) => {
         if (!targets.length || deleting) return;
-        const label = targets.length === 1
-            ? `"${targets[0].title}"`
-            : `${targets.length} clips`;
-        if (!window.confirm(
-            `Delete ${label}? The rendered file(s) are removed from disk and cannot be recovered.`)) return;
         setDeleting(true);
+        setDeleteError('');
         setActionError('');
         try {
             const res = await fetch(getApiUrl('/api/gallery/delete'), {
@@ -186,6 +200,7 @@ export default function Gallery() {
             });
             if (!res.ok) throw new Error((await res.text()).slice(0, 240) || `HTTP ${res.status}`);
             const data = await res.json();
+            setPendingDelete([]);
             setSelected(new Set());
             setSelectMode(false);
             setActive((current) => (
@@ -195,7 +210,9 @@ export default function Gallery() {
             }
             await fetchClips(0, false);
         } catch (e) {
-            setActionError(String(e.message || e).slice(0, 240));
+            // Keep the dialog open so the message is next to the action that
+            // failed (the old window.confirm swallowed it into actionError).
+            setDeleteError(String(e.message || e).slice(0, 240));
         } finally {
             setDeleting(false);
         }
@@ -313,7 +330,7 @@ export default function Gallery() {
                             <span className="readout">{selected.size} selected</span>
                             <button
                                 type="button"
-                                onClick={() => deleteClips(selectedClips)}
+                                onClick={() => requestDelete(selectedClips)}
                                 disabled={!selected.size || deleting}
                                 className="btn-quiet text-xs py-1.5 px-2.5 text-danger"
                             >
@@ -359,7 +376,7 @@ export default function Gallery() {
                                     selected={selected.has(keyOf(clip))}
                                     onToggleSelect={toggleSelected}
                                     onOpen={setActive}
-                                    onDelete={(c) => deleteClips([c])}
+                                    onDelete={(c) => requestDelete([c])}
                                 />
                             ))}
                         </div>
@@ -384,9 +401,18 @@ export default function Gallery() {
                     clip={active}
                     onClose={() => setActive(null)}
                     onChanged={handleChanged}
-                    onDelete={(c) => deleteClips([c])}
+                    onDelete={(c) => requestDelete([c])}
                 />
             )}
+
+            <ConfirmDeleteModal
+                open={pendingDelete.length > 0}
+                clips={pendingDelete}
+                busy={deleting}
+                error={deleteError}
+                onCancel={cancelDelete}
+                onConfirm={() => deleteClips(pendingDelete)}
+            />
         </div>
     );
 }

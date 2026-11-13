@@ -64,15 +64,45 @@ def test_single_and_bulk_delete_are_wired():
     assert "/api/gallery/delete" in gallery
     assert "selected" in gallery and "selectMode" in gallery
     assert "delete ({selected.size})" in gallery
-    assert "window.confirm" in gallery
     # A single clip's delete button (hover) and the modal's delete both call it.
     assert "onDelete" in card
     assert "onDelete?.(clip)" in card
 
 
+def test_delete_uses_an_in_app_confirmation_not_window_confirm():
+    gallery = _read("components", "Gallery.jsx")
+    modal = _read("components", "ConfirmDeleteModal.jsx")
+    # The delete path no longer builds a confirm string or calls window.confirm
+    # (archive-all, which keeps the files, still uses the browser prompt).
+    assert "Delete ${label}?" not in gallery
+    assert "requestDelete" in gallery
+    assert "ConfirmDeleteModal" in gallery and "<ConfirmDeleteModal" in gallery
+    # The dialog is the explanation plus the two decisions.
+    assert "<Modal" in modal
+    assert "btn-danger" in modal
+    assert "keep it" in modal
+    assert "cannot be undone" in modal
+
+
+def test_the_confirmation_names_the_clips_that_go():
+    modal = _read("components", "ConfirmDeleteModal.jsx")
+    assert "clips.slice(0, 4)" in modal
+    assert "clip.title" in modal
+    assert "+{more} more" in modal
+
+
+def test_the_delete_dialog_sits_above_the_player():
+    modal = _read("components", "ConfirmDeleteModal.jsx")
+    shell = _read("components", "ui", "Modal.jsx")
+    clip = _read("components", "ClipModal.jsx")
+    assert "layer=\"z-[140]\"" in modal
+    assert "z-[130]" in clip
+    assert "layer = 'z-[100]'" in shell
+
+
 def test_bulk_delete_is_behind_a_confirm_and_a_delete_button():
     gallery = _read("components", "Gallery.jsx")
-    assert "Delete ${label}?" in gallery
+    assert "requestDelete(selectedClips)" in gallery
     assert "select all" in gallery
     assert "deleted" in gallery
 
