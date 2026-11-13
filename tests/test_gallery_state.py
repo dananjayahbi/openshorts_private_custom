@@ -25,6 +25,8 @@ class TestStore:
         assert clip_state.flags("job-1", 0) == {
             "used": False, "archived": False,
             "used_at": None, "archived_at": None,
+            "platforms": {"facebook": False, "youtube": False},
+            "platform_times": {},
         }
 
     def test_flags_round_trip_and_untoggle_cleans_up(self, store):
@@ -64,6 +66,54 @@ class TestStore:
         assert clip_state.prune([("kept", 0)]) == 1
         assert clip_state.flags("gone", 0)["used"] is False
         assert clip_state.flags("kept", 0)["used"] is True
+
+
+class TestPlatforms:
+    def test_a_clip_can_be_posted_on_one_platform_only(self, store):
+        flags = clip_state.set_flags("job-1", 0, platforms={"facebook": True})
+        assert flags["platforms"] == {"facebook": True, "youtube": False}
+        assert flags["used"] is True
+        assert flags["platform_times"]["facebook"]
+
+        # YouTube on too: still used, both remembered.
+        flags = clip_state.set_flags("job-1", 0, platforms={"youtube": True})
+        assert flags["platforms"] == {"facebook": True, "youtube": True}
+
+        # Facebook off: YouTube alone keeps it used.
+        flags = clip_state.set_flags("job-1", 0, platforms={"facebook": False})
+        assert flags["platforms"] == {"facebook": False, "youtube": True}
+        assert flags["used"] is True
+
+        # The last platform off: the clip is unused again, and the entry is
+        # clean (no dead platform keys left).
+        flags = clip_state.set_flags("job-1", 0, platforms={"youtube": False})
+        assert flags["used"] is False
+        assert flags["platforms"] == {"facebook": False, "youtube": False}
+        assert json.loads((store / "clip_state.json").read_text()) in ({},)
+
+    def test_a_legacy_used_flag_counts_and_converts_on_toggle(self, store):
+        clip_state.set_flags("job-1", 0, used=True)
+        assert clip_state.flags("job-1", 0)["used"] is True
+        assert clip_state.flags("job-1", 0)["platforms"] == {"facebook": False, "youtube": False}
+
+        flags = clip_state.set_flags("job-1", 0, platforms={"youtube": True})
+        assert flags["platforms"]["youtube"] is True and flags["used"] is True
+
+        flags = clip_state.set_flags("job-1", 0, platforms={"youtube": False})
+        assert flags["used"] is False
+
+    def test_archive_used_archives_platform_marked_clips(self, store):
+        clip_state.set_flags("job-1", 0, platforms={"facebook": True})
+        clip_state.set_flags("job-1", 1, platforms={"youtube": False})
+        assert clip_state.archive_used() == 1
+        assert clip_state.flags("job-1", 0)["archived"] is True
+        assert clip_state.flags("job-1", 1)["archived"] is False
+
+    def test_snapshot_carries_platforms(self, store):
+        clip_state.set_flags("job-1", 0, platforms={"youtube": True})
+        snap = clip_state.snapshot()["job-1:0"]
+        assert snap["platforms"]["youtube"] is True
+        assert snap["used"] is True
 
 
 @pytest.fixture()
@@ -109,6 +159,44 @@ class TestGalleryApi:
         assert _titles(gallery.get("/api/gallery/clips")) == ["B0", "A0", "A1"]
         assert _titles(gallery.get("/api/gallery/clips?usage=used")) == ["A0"]
         assert "A0" not in _titles(gallery.get("/api/gallery/clips?usage=unused"))
+
+    def test_platforms_are_separate_and_drive_the_used_tab(self, gallery):
+        r = gallery.patch("/api/gallery/clip/job-a/0", json={"platform": "facebook", "posted": True})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["platforms"] == {"facebook": True, "youtube": False}
+        assert body["used"] is True
+        assert _titles(gallery.get("/api/gallery/clips?usage=used")) == ["A0"]
+
+        # YouTube still pending: the clip can be marked there independently.
+        body = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"platforms": {"youtube": True}}).json()
+        assert body["platforms"] == {"facebook": True, "youtube": True}
+
+        # Taking it off Facebook leaves YouTube, so it stays used.
+        body = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"platform": "facebook", "posted": False}).json()
+        assert body["platforms"] == {"facebook": False, "youtube": True}
+        assert body["used"] is True
+
+        # Last platform off: it is unused again, not archived.
+        body = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"platform": "youtube", "posted": False}).json()
+        assert body["used"] is False
+        assert body["platforms"] == {"facebook": False, "youtube": False}
+        assert _titles(gallery.get("/api/gallery/clips?usage=used")) == []
+
+    def test_an_unknown_platform_is_rejected(self, gallery):
+        res = gallery.patch("/api/gallery/clip/job-a/0",
+                            json={"platform": "tiktok", "posted": True})
+        assert res.status_code == 400
+        assert "facebook" in res.json()["detail"]
+
+    def test_flags_carry_platform_names(self, gallery):
+        clip = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"platforms": {"youtube": True}}).json()
+        for key in ("platforms", "platform_times", "used", "archived"):
+            assert key in clip
 
     def test_archive_moves_a_clip_out_of_the_library(self, gallery):
         gallery.patch("/api/gallery/clip/job-a/1", json={"archived": True})

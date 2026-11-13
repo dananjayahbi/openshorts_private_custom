@@ -94,6 +94,12 @@ export default function GalleryCard({ clip, onChanged }) {
         }
     };
 
+    // Posted per platform, not as one switch: the same clip can be out on
+    // Facebook and still pending on YouTube.
+    const platforms = clip.platforms || {};
+    const onAnyPlatform = !!(platforms.facebook || platforms.youtube);
+    const togglePlatform = (name) => patchClip({ platform: name, posted: !platforms[name] });
+
     return (
         <div
             ref={cardRef}
@@ -133,11 +139,25 @@ export default function GalleryCard({ clip, onChanged }) {
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/75 text-white lowercase flex items-center gap-1">
                             <Archive size={10} /> archived
                         </span>
-                    ) : clip.used ? (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[color:var(--color-accent)] text-paper lowercase flex items-center gap-1">
-                            <CheckCircle2 size={10} /> used
-                        </span>
-                    ) : null}
+                    ) : (
+                        <>
+                            {platforms.facebook && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/75 text-white lowercase">
+                                    facebook
+                                </span>
+                            )}
+                            {platforms.youtube && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/75 text-white lowercase">
+                                    youtube
+                                </span>
+                            )}
+                            {clip.used && !onAnyPlatform && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[color:var(--color-accent)] text-paper lowercase flex items-center gap-1">
+                                    <CheckCircle2 size={10} /> used
+                                </span>
+                            )}
+                        </>
+                    )}
                 </div>
             </div>
 
@@ -202,18 +222,26 @@ export default function GalleryCard({ clip, onChanged }) {
 
                 {error && <p className="text-[11px] text-danger mb-2" role="alert">{error}</p>}
 
-                {/* Footer actions: mark posted, archive, download */}
-                <div className="flex items-center gap-1.5">
-                    <button
-                        onClick={() => patchClip({ used: !clip.used })}
-                        disabled={busy || clip.archived}
-                        className={`btn-quiet flex-1 text-xs py-1.5 px-2 ${clip.used ? 'text-brass' : ''}`}
-                        title={clip.used ? 'Mark as not used' : 'Mark as used (already posted)'}
-                    >
-                        {busy ? <Loader2 size={13} className="animate-spin" />
-                            : clip.used ? <CheckCircle2 size={13} /> : <Circle size={13} />}
-                        {clip.used ? 'used' : 'mark used'}
-                    </button>
+                {/* Footer actions: post on each platform, archive, download */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                    {[['facebook', 'Facebook'], ['youtube', 'YouTube']].map(([id, label]) => {
+                        const on = !!platforms[id];
+                        return (
+                            <button
+                                key={id}
+                                onClick={() => togglePlatform(id)}
+                                disabled={busy || clip.archived}
+                                className={`btn-quiet flex-1 text-[11px] py-1.5 px-2 min-w-[86px] ${on ? 'text-brass' : ''}`}
+                                title={on
+                                    ? `Posted on ${label} — click to mark it unposted there`
+                                    : `Mark as posted on ${label}`}
+                            >
+                                {busy ? <Loader2 size={12} className="animate-spin" />
+                                    : on ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                                {label}
+                            </button>
+                        );
+                    })}
                     <button
                         onClick={() => patchClip({ archived: !clip.archived })}
                         disabled={busy}

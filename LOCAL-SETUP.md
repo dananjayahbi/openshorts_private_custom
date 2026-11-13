@@ -119,8 +119,14 @@ Each card has two pieces of review state, stored in
 `Storage/clip_state.json` (keyed `<job_id>:<index>`, so a re-render that renames
 the file keeps them):
 
-- **Used** — "I already posted this". The library has Library / Used / Unused
-  tabs; a used clip is not processed again by accident.
+- **Posted on Facebook / YouTube** — two independent marks, because the same
+  clip can be out on one platform and still pending on the other. Marking
+  either makes the clip **used** (the Used tab counts a clip if it is on at
+  least one platform); clearing both makes it unused again. The card shows the
+  platforms it is on. `PATCH /api/gallery/clip/{id}/{index}` takes
+  `{"platform": "facebook", "posted": true}` or
+  `{"platforms": {"facebook": true, "youtube": false}}`; the legacy
+  `{"used": true}` still works and converts on the first platform toggle.
 - **Archived** — hides the card from the library but keeps the file. The
   Archived tab restores one clip; **archive used (N)** moves every used clip in
   one call.

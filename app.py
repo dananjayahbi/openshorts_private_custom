@@ -10481,7 +10481,7 @@ def _job_clip_count(job_id):
 
 @app.patch("/api/gallery/clip/{job_id}/{index}")
 async def set_gallery_clip_state(job_id: str, index: int, request: Request):
-    """Mark one clip used / unused, or archive / restore it."""
+    """Post/remove one clip on a platform, mark it used (legacy), or archive it."""
     if index < 0:
         raise HTTPException(status_code=400, detail="Invalid clip index")
     if index >= _job_clip_count(job_id):
@@ -10491,11 +10491,29 @@ async def set_gallery_clip_state(job_id: str, index: int, request: Request):
     except Exception:
         body = {}
     body = body if isinstance(body, dict) else {}
-    if "used" not in body and "archived" not in body:
+    platforms = body.get("platforms")
+    platform = body.get("platform")
+    if platform is not None:
+        if platform not in clip_state.PLATFORMS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"platform must be one of {', '.join(clip_state.PLATFORMS)}")
+        platforms = {platform: bool(body.get("posted"))}
+    elif platforms is not None:
+        if not isinstance(platforms, dict):
+            raise HTTPException(status_code=400, detail="platforms must be an object")
+        unknown = [k for k in platforms if k not in clip_state.PLATFORMS]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown platform(s): {', '.join(unknown)}")
+    if ("used" not in body and "archived" not in body
+            and platforms is None):
         raise HTTPException(status_code=400, detail="Nothing to change")
     return await asyncio.to_thread(
         clip_state.set_flags, job_id, index,
-        used=body.get("used"), archived=body.get("archived"))
+        used=body.get("used"), archived=body.get("archived"),
+        platforms=platforms)
 
 
 @app.post("/api/gallery/archive-used")
