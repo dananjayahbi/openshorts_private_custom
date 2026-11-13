@@ -114,12 +114,21 @@ score, the tags, the YouTube title and both captions (each with a copy button),
 the Facebook/YouTube marks, archive and **delete**. Escape or the backdrop
 closes it.
 
+Each tile is a **JPEG still**, not a video: the API writes `poster_clip_N.jpg`
+(a frame about a second in, 640 px wide) next to the clip, caches it, and the
+grid loads that. The tiles used to point a `<video preload="metadata">` at the
+clip, which browser download managers read as "save this MP4" — merely opening
+the gallery or the home page started a shelf of MP4 downloads. Only the modal
+player now loads video bytes. `ffmpeg` failures are quiet (the tile keeps its
+empty frame; the clip still opens), and a missing poster is made once per page
+and reused on every later request.
+
 - **Delete** — the hover trash on a tile, or the modal's delete, removes every
   file of that clip (clean cut, captioned/subtitled and watermark twins, layout
-  sidecar), its review state key, and the card. **select** enters selection
-  mode (checkboxes, select all); **delete (n)** removes the selected clips in
-  one call. The job's metadata entry stays so the remaining clips keep their
-  index/file pairing; the gallery skips an index with no file.
+  sidecar, poster JPEG), its review state key, and the card. **select** enters
+  selection mode (checkboxes, select all); **delete (n)** removes the selected
+  clips in one call. The job's metadata entry stays so the remaining clips keep
+  their index/file pairing; the gallery skips an index with no file.
 - API: `DELETE /api/gallery/clip/{job_id}/{index}` and
   `POST /api/gallery/delete {"clips": [...]}` (validated, max 200).
 - The score is the moment picker's `predicted_score`, unchanged since the clip
@@ -582,6 +591,8 @@ each job's `*_metadata.json` and returns every clip that really rendered:
 - the file served is the **captioned** copy when the job made one (newest
   `*clip_N.mp4`), otherwise the clean cut; `wm_` twins are skipped
 - title, hook, TikTok/Instagram captions, duration, score, date
+- a `poster` URL for the tile (the cached JPEG still described above; `null`
+  when the frame could not be extracted)
 - served through `/videos/<job_id>/<file>`, the same authenticated path the job
   results use
 - in cloud mode it filters by the job's `.owner` sidecar

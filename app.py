@@ -10329,6 +10329,55 @@ def _gallery_clip_file(output_dir, clip_index):
         return candidates[0]
 
 
+def _gallery_poster_name(index):
+    return f"poster_clip_{index + 1}.jpg"
+
+
+def _gallery_poster_ready(output_dir, clip_path, index):
+    """The cached poster for one clip, when it is newer than the clip file."""
+    poster = os.path.join(output_dir, _gallery_poster_name(index))
+    try:
+        if os.path.exists(poster) and os.path.getmtime(poster) >= os.path.getmtime(clip_path):
+            return poster
+    except OSError:
+        return None
+    return None
+
+
+def _make_gallery_poster(output_dir, clip_path, index, duration):
+    """Write a still frame for a gallery tile (a JPEG), or None on failure.
+
+    The tiles used to load the clip itself in a ``<video>`` element. A browser
+    download manager reads every ``<video>`` source as "save this MP4", so
+    opening the gallery (or the home page) started a shelf of downloads. A still
+    is not a video, so only the modal player — the one place a clip is meant to
+    play — is ever detected. A failed extraction is quiet: the tile keeps its
+    empty frame and the clip still opens normally.
+    """
+    poster = os.path.join(output_dir, _gallery_poster_name(index))
+    try:
+        seconds = max(0.0, float(duration or 0))
+    except (TypeError, ValueError):
+        seconds = 0.0
+    at = min(1.0, max(0.1, seconds / 3 if seconds else 0.5))
+    try:
+        # A truncated or placeholder file cannot yield a frame; do not pay for
+        # an ffmpeg start (and a failed extraction on every poll) for it.
+        if os.path.getsize(clip_path) < 1024:
+            return None
+    except OSError:
+        return None
+    try:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{at:.3f}", "-i", clip_path,
+             "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3", "-y", poster],
+            check=True, capture_output=True, timeout=30,
+        )
+    except Exception:
+        return None
+    return poster if os.path.exists(poster) else None
+
+
 def _gallery_entry(job_id, output_dir, index, clip, created_at):
     """One gallery card, or None when the clip never rendered to disk."""
     filename = _gallery_clip_file(output_dir, index)
@@ -10341,12 +10390,17 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
     title = (clip.get("video_title_for_youtube_short")
              or clip.get("viral_hook_text")
              or f"Clip {index + 1}")
+    poster = _gallery_poster_ready(output_dir, filename, index)
     return {
         "job_id": job_id,
         "index": index,
         "title": title,
         "hook": clip.get("viral_hook_text"),
         "url": f"/videos/{job_id}/{os.path.basename(filename)}",
+        # A still for the tile; _gallery_clips fills a missing one in before
+        # answering, so only the modal's <video> ever requests the clip bytes.
+        "poster": (f"/videos/{job_id}/{os.path.basename(poster)}"
+                   if poster else None),
         "duration": duration,
         "created_at": created_at,
         "score": clip.get("predicted_score"),
@@ -10447,6 +10501,30 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
             if total > offset and len(clips) < limit:
                 clips.append(entry)
 
+    # Tiles are stills (see _make_gallery_poster). Fill the ones this page
+    # needs in parallel; clips left out by the page/filters cost nothing, and
+    # a repeat request reuses the cached JPEG. Four at a time: a first page can
+    # hold 100 clips and 100 ffmpeg starts at once would starve the box.
+    missing = [c for c in clips if not c.get("poster")]
+    if missing:
+        slots = asyncio.Semaphore(4)
+
+        def _poster_for(entry):
+            job_dir = os.path.join(OUTPUT_DIR, entry["job_id"])
+            clip_path = _gallery_clip_file(job_dir, entry["index"])
+            if not clip_path:
+                return
+            made = _make_gallery_poster(job_dir, clip_path, entry["index"],
+                                        entry.get("duration"))
+            if made:
+                entry["poster"] = f"/videos/{entry['job_id']}/{os.path.basename(made)}"
+
+        async def _fill(entry):
+            async with slots:
+                await asyncio.to_thread(_poster_for, entry)
+
+        await asyncio.gather(*(_fill(c) for c in missing))
+
     # Drop state for clips whose job directory was deleted (retention sweep).
     try:
         await asyncio.to_thread(clip_state.prune, known)
@@ -10538,6 +10616,9 @@ def _delete_gallery_clip_files(job_id: str, index: int) -> list:
         for path in glob.glob(os.path.join(job_dir, f"*clip_{index + 1}.mp4*")):
             if _remove_tree(path):
                 removed.append(os.path.basename(path))
+        poster = os.path.join(job_dir, _gallery_poster_name(index))
+        if os.path.exists(poster) and _remove_tree(poster):
+            removed.append(os.path.basename(poster))
     clip_state.forget(job_id, index)
     return removed
 

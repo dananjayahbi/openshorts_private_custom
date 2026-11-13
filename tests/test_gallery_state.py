@@ -133,7 +133,7 @@ def gallery(tmp_path, monkeypatch):
             {"start": 0, "end": 10, "video_title_for_youtube_short": t} for t in clips
         ]}))
         for i in range(len(clips)):
-            (d / f"{job_id}_clip_{i + 1}.mp4").write_bytes(b"x")
+            (d / f"{job_id}_clip_{i + 1}.mp4").write_bytes(b"x" * 2048)
 
     job("job-a", ["A0", "A1"])
     job("job-b", ["B0"])
@@ -278,3 +278,49 @@ class TestGalleryApi:
         assert len(first["clips"]) == 2 and first["has_more"] is True
         second = gallery.get("/api/gallery/clips?limit=2&offset=2").json()
         assert len(second["clips"]) == 1 and second["has_more"] is False
+
+
+class TestGalleryPosters:
+    """The grid paints JPEG stills; the clip's <video> exists only in the modal.
+
+    Loading the MP4 in every tile made browser download managers open a shelf
+    of MP4 downloads, so the API now hands out a cached poster frame.
+    """
+
+    def test_a_cached_poster_rides_along(self, gallery, tmp_path):
+        poster = tmp_path / "videos" / "job-a" / "poster_clip_1.jpg"
+        poster.write_bytes(b"jpeg")
+        body = gallery.get("/api/gallery/clips").json()
+        a0 = next(c for c in body["clips"]
+                  if c["job_id"] == "job-a" and c["index"] == 0)
+        assert a0["poster"] == "/videos/job-a/poster_clip_1.jpg"
+
+    def test_a_missing_poster_is_written_once_and_reused(self, gallery, monkeypatch):
+        app_module = pytest.importorskip("app")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            with open(cmd[-1], "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+            return type("Result", (), {"returncode": 0})()
+
+        monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+
+        first = gallery.get("/api/gallery/clips?limit=2").json()
+        assert len(first["clips"]) == 2
+        assert all(c["poster"].startswith("/videos/") for c in first["clips"])
+        assert len(calls) == 2
+
+        second = gallery.get("/api/gallery/clips?limit=2").json()
+        assert [c["poster"] for c in second["clips"]] == [c["poster"] for c in first["clips"]]
+        assert len(calls) == 2, "a cached poster must not re-run ffmpeg"
+
+    def test_deleting_a_clip_deletes_its_poster(self, gallery, tmp_path):
+        poster = tmp_path / "videos" / "job-a" / "poster_clip_1.jpg"
+        poster.write_bytes(b"jpeg")
+        res = gallery.delete("/api/gallery/clip/job-a/0")
+        assert res.status_code == 200
+        assert "poster_clip_1.jpg" in res.json()["files"]
+        assert not poster.exists()
+

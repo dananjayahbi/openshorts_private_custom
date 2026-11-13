@@ -38,18 +38,23 @@ export default function GalleryCard({
                 className="block w-full text-left"
             >
                 <div className="relative aspect-square bg-black overflow-hidden">
-                    {/* A poster, not a player: metadata only, no controls. The
-                        #t fragment makes the browser paint a frame instead of
-                        the first black frame some captures start on. */}
-                    <video
-                        src={`${clip.url}#t=0.1`}
-                        preload="metadata"
-                        muted
-                        playsInline
-                        tabIndex={-1}
-                        aria-hidden="true"
-                        className="w-full h-full object-cover pointer-events-none"
-                    />
+                    {/* A still frame, not a player. A video source is what a
+                        browser download manager treats as "save this MP4"; a
+                        JPEG is not, so only the modal (the one place a clip is
+                        meant to play) loads video bytes. The server writes and
+                        caches the JPEG; see _make_gallery_poster. */}
+                    {clip.poster ? (
+                        <img
+                            src={clip.poster}
+                            alt=""
+                            loading="lazy"
+                            decoding="async"
+                            draggable={false}
+                            className="w-full h-full object-cover pointer-events-none"
+                        />
+                    ) : (
+                        <div className="w-full h-full" aria-hidden="true" />
+                    )}
 
                     <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/80 to-transparent" />
 

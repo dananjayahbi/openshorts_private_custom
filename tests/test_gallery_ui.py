@@ -15,16 +15,30 @@ def _read(*parts):
         return f.read()
 
 
-def test_a_card_is_a_poster_not_a_player():
+def test_a_card_is_a_still_not_a_video():
     card = _read("components", "GalleryCard.jsx")
     assert "onOpen" in card
-    # The tile's <video> has no controls and cannot be interacted with: the
-    # click belongs to the card, which opens the modal.
-    video = card.split("<video", 1)[1].split("/>", 1)[0]
-    assert "preload=\"metadata\"" in video
-    assert "pointer-events-none" in video
-    assert "controls" not in video
+    # The tile is a JPEG poster. It must not be a <video>: a browser download
+    # manager treats every video source as a file to save, so painting the
+    # grid opened a shelf of MP4 downloads.
+    assert "<video" not in card
+    assert "<img" in card
+    assert "clip.poster" in card
+    assert "loading=\"lazy\"" in card
     assert "aspect-square" in card
+
+
+def test_the_home_page_tiles_are_stills_too():
+    home = _read("components", "HomeDashboard.jsx")
+    assert "<video" not in home
+    assert "<img" in home
+    assert "clip.poster" in home
+
+
+def test_only_the_modal_player_loads_video_bytes():
+    for name in ("GalleryCard.jsx", "HomeDashboard.jsx"):
+        assert "<video" not in _read("components", name), name
+    assert "<video" in _read("components", "ClipModal.jsx")
 
 
 def test_clicking_opens_the_full_viewport_modal():

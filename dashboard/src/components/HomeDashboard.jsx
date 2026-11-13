@@ -73,7 +73,11 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
     ]);
     if (ov.status === 'fulfilled') setOverview(ov.value);
     if (gal.status === 'fulfilled') {
-      setClips((gal.value.clips || []).map((c) => ({ ...c, url: getApiUrl(c.url) })));
+      setClips((gal.value.clips || []).map((c) => ({
+        ...c,
+        url: getApiUrl(c.url),
+        poster: c.poster ? getApiUrl(c.poster) : null,
+      })));
     }
     setLoaded(true);
   }, []);
@@ -328,13 +332,21 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
                   className="card card-hover p-2.5 text-left group min-w-0"
                 >
                   <div className="aspect-[4/3] rounded-input bg-paper3 mb-2.5 overflow-hidden relative">
-                    <video
-                      src={`${clip.url}#t=0.1`}
-                      preload="metadata"
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
-                    />
+                    {/* A still, not a video: a video source triggers a
+                        download manager for every tile. Only the gallery's
+                        modal player loads the clip itself. */}
+                    {clip.poster ? (
+                      <img
+                        src={clip.poster}
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                        className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
+                      />
+                    ) : (
+                      <div className="w-full h-full" aria-hidden="true" />
+                    )}
                     <span className="readout absolute bottom-1.5 right-1.5 bg-paper/85 px-1.5 py-0.5 rounded tabular-nums">
                       {(Number(clip.duration) || 0).toFixed(1)}s
                     </span>
