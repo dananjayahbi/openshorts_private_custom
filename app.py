@@ -2,6 +2,7 @@ import os
 import llm_backend
 import platform_compat
 import storage
+import collector
 import re
 import sys
 import uuid
@@ -4337,6 +4338,13 @@ app.mount("/thumbnails", RestoringStaticFiles(
     directory=THUMBNAILS_DIR, guard=media_auth.is_servable,
     authorize=lambda path, scope: _authorize_media("thumbnails", path, scope)), name="thumbnails")
 
+# Collector media (downloaded sources and their thumbnails). The mount's
+# allowlist only serves images/videos, so the index (items.json) stays private
+# even though it sits in the same directory.
+collector.ensure()
+app.mount("/collector", RestoringStaticFiles(
+    directory=collector.COLLECTOR_DIR, guard=media_auth.is_servable), name="collector")
+
 
 def _safe_under(base_dir: str, user_rel_path: str) -> Optional[str]:
     """Resolve ``user_rel_path`` under ``base_dir`` and reject path traversal.
@@ -5415,6 +5423,87 @@ async def delete_upload(upload_id: str, request: Request):
     return {"deleted": upload_id}
 
 
+# --- Collector: the shelf of videos to clip later (collector.py) -------------
+def _collector_thumb(video_path, thumb_path):
+    """A poster frame for a local upload; silently no-ops on failure."""
+    duration = _media_duration_seconds(video_path) or 0
+    at = min(2.0, max(0.1, duration / 2)) if duration else 0.5
+    try:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{at:.3f}", "-i", video_path,
+             "-frames:v", "1", "-vf", "scale=640:-2", "-y", thumb_path],
+            check=True, capture_output=True, timeout=60,
+        )
+    except Exception:
+        pass
+
+
+@app.get("/api/collector")
+async def collector_list():
+    items = await asyncio.to_thread(collector.list_items)
+    return {"items": items, "queued": sum(1 for i in items if i["queued"])}
+
+
+@app.post("/api/collector")
+async def collector_add(request: Request):
+    """Add a link: metadata + thumbnail only, no video bytes."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    url = str((body or {}).get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Paste a video link.")
+    try:
+        return await asyncio.to_thread(collector.add_url, url)
+    except Exception as e:
+        raise HTTPException(status_code=400,
+                            detail=(str(e).strip() or "Could not read this link.")[:400])
+
+
+@app.post("/api/collector/upload")
+async def collector_upload(file: UploadFile = File(...)):
+    """Store a local video in the collector (streamed to disk)."""
+    try:
+        return await asyncio.to_thread(
+            collector.add_upload, file.filename or "video.mp4", file,
+            MAX_FILE_SIZE_MB * 1024 * 1024, _media_duration_seconds, _collector_thumb)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400,
+                            detail=f"Could not save the video: {str(e)[:300]}")
+
+
+@app.post("/api/collector/{item_id}/download")
+async def collector_download(item_id: str):
+    """Fetch the video now, in the background, and report progress on the list."""
+    try:
+        return collector.start_download(item_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Collector item not found")
+
+
+@app.post("/api/collector/{item_id}/queue")
+async def collector_queue(item_id: str, request: Request):
+    """Put an item in (or take it out of) the processing queue."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    item = collector.set_queued(item_id, bool((body or {}).get("queued", True)))
+    if item is None:
+        raise HTTPException(status_code=404, detail="Collector item not found")
+    return item
+
+
+@app.delete("/api/collector/{item_id}")
+async def collector_remove(item_id: str):
+    if not await asyncio.to_thread(collector.delete, item_id):
+        raise HTTPException(status_code=404, detail="Collector item not found")
+    return {"deleted": item_id}
+
+
 def _sweep_pending_uploads(now=None):
     """Expire agent upload slots older than UPLOAD_TTL_SECONDS (file included).
     Returns the ids removed. Called from the cleanup loop; pure enough to test."""
@@ -5547,6 +5636,7 @@ async def process_endpoint(
     clip_plan: Optional[str] = Form(None),
     transcribe_only: Optional[str] = Form(None),
     source_job_id: Optional[str] = Form(None),
+    collector_id: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     # Agent flow: a supplied clip plan (or a transcription-only run) needs no
@@ -5588,6 +5678,7 @@ async def process_endpoint(
         clip_plan = body.get("clip_plan")
         transcribe_only = body.get("transcribe_only")
         source_job_id = body.get("source_job_id")
+        collector_id = body.get("collector_id")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -5617,8 +5708,26 @@ async def process_endpoint(
     if upload_id and not url and not file and not thumb_session:
         upload_slot = _take_pending_upload(upload_id, await _owner_id(request))
 
-    if not url and not file and not thumb_session and not upload_slot and not source_job_id:
-        raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
+    # Collector item: a video added on the Collector page. A downloaded file is
+    # hardlinked into the job (the collector keeps its own copy); an item that
+    # was only probed from a link goes down the URL path, which also runs the
+    # URL validation and quality probe below.
+    collector_item = None
+    if collector_id and not url and not file and not thumb_session and not source_job_id:
+        collector_item = collector.get(collector_id)
+        if collector_item is None:
+            raise HTTPException(status_code=404, detail="Collector item not found")
+        if not collector.file_path(collector_item):
+            if not collector_item.get("url"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This collector item has no file yet: download it first.")
+            url = collector_item["url"]
+
+    if (not url and not file and not thumb_session and not upload_slot
+            and not source_job_id and not collector_item):
+        raise HTTPException(status_code=400,
+                            detail="Must provide URL, File, upload_id, source_job_id or collector_id")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
     # re-validates anyway, but failing at submit is the debuggable behavior.
@@ -5654,7 +5763,7 @@ async def process_endpoint(
         "user_agent": user_agent,
         "timestamp": time.time(),
         "source": ("thumbnail_session" if thumb_session else "upload_id" if upload_slot
-                   else "url" if url else "file"),
+                   else "collector" if collector_item else "url" if url else "file"),
     }
 
     job_id = str(uuid.uuid4())
@@ -5792,6 +5901,21 @@ async def process_endpoint(
             with open(transcript_path, "w") as f:
                 json.dump(src_transcript, f)
             cmd.extend(["--transcript", transcript_path])
+    elif collector_item:
+        # A ready collector file: hardlink it into the job, so the job cleans up
+        # its own link while the collector keeps the user's copy.
+        src = collector.file_path(collector_item)
+        src_duration = _media_duration_seconds(src)
+        if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_short_source(src_duration)
+        safe_name = _clamp_upload_name(os.path.basename(src))
+        input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{safe_name}")
+        try:
+            os.link(src, input_path)
+        except OSError:
+            shutil.copyfile(src, input_path)
+        cmd.extend(["-i", input_path])
     elif upload_slot:
         # Move the pre-uploaded file under the job's name so it is cleaned up
         # with the job like any other upload; the slot is consumed.
@@ -5966,6 +6090,14 @@ async def process_endpoint(
         # A free-plan job paid with top-up minutes queues with the paid plans.
         'topup': bool(getattr(request.state, "queue_topup", False)),
     }
+
+    if collector_id:
+        # The item has left the queue and now points at its running job, so the
+        # Collector page can show "processing" instead of the queued toggle.
+        try:
+            collector.mark_job(collector_id, job_id)
+        except Exception as e:
+            print(f"⚠️ Could not update collector item {collector_id}: {e}")
 
     # Persist the owner so recovered jobs keep their multi-tenant guard after a
     # restart (see _recover_jobs_from_disk).

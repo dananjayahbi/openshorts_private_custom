@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
+import Collector from './components/Collector';
+import BatchQueue from './components/BatchQueue';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
 import HomeDashboard from './components/HomeDashboard';
@@ -387,7 +389,12 @@ function App() {
     try { return window.innerWidth >= 768; } catch { return true; }
   });
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, ai-agent, thumbnails, settings
+  // Bulk mode: { rows: [{key,label,state,jobId,error}], running, startedAt }.
+  // It renders instead of the single-job view and survives tab switches while
+  // this browser tab is open.
+  const [batch, setBatch] = useState(null);
+  const batchCancelRef = useRef(false);
+  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, ai-agent, thumbnails, settings
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
@@ -995,7 +1002,7 @@ function App() {
   useEffect(() => {
     // 'history' is the pre-redesign name of the Clip Gallery: emails already
     // sent still point at it, so it is accepted and mapped, not ignored.
-    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'ai-agent', 'history'];
+    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'collector', 'ai-agent', 'history'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
@@ -1147,6 +1154,59 @@ function App() {
     }
   };
 
+  // The single place that turns a dashboard source into the /api/process
+  // request. Both the single-video flow and bulk mode call it, so a new source
+  // type or option can never work in one and silently be missing in the other.
+  const buildProcessRequest = (data, forceLowQuality = false) => {
+    let body;
+    // BYOK sends the Gemini header; managed users rely on the bearer token
+    // that apiFetch attaches automatically.
+    const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+
+    // Advanced generation controls: only sent when the user set them, so the
+    // default request stays byte-identical to the pre-feature one.
+    const advanced = {
+      target_clips: data.targetClips || null,
+      clip_min_seconds: data.clipMinSeconds || null,
+      clip_max_seconds: data.clipMaxSeconds || null,
+      // Sent explicitly both ways: absent means off for raw API callers,
+      // but the dashboard always states the user's choice.
+      auto_hook: data.autoHook ? '1' : '0',
+      auto_hook_style: data.autoHook ? (data.autoHookStyle || 'pill') : null,
+      // 'auto' is the server default, so only a deliberate choice travels.
+      layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+      // Set when the user took the quota wall's "clip the first N minutes"
+      // offer: the server reserves N minutes and cuts the source to them.
+      max_minutes: data.maxMinutes || null,
+      // The stretch picked under the cost line (seconds); absent = whole video.
+      source_start: data.sourceStart ?? null,
+      source_end: data.sourceEnd ?? null,
+    };
+
+    if (data.type === 'url' || data.type === 'thumbnail_session' || data.type === 'collector') {
+      headers['Content-Type'] = 'application/json';
+      const key = data.type === 'url' ? 'url'
+        : data.type === 'collector' ? 'collector_id' : 'thumbnail_session_id';
+      body = JSON.stringify({
+        [key]: data.payload,
+        acknowledged: !!data.acknowledged,
+        output_format: data.outputFormat || 'auto',
+        ...(data.type === 'url' ? { force_low_quality: forceLowQuality } : {}),
+        ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
+      });
+    } else {
+      const formData = new FormData();
+      formData.append('file', data.payload);
+      formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
+      formData.append('output_format', data.outputFormat || 'auto');
+      for (const [k, v] of Object.entries(advanced)) {
+        if (v != null) formData.append(k, v);
+      }
+      body = formData;
+    }
+    return { headers, body };
+  };
+
   const handleProcess = async (data, forceLowQuality = false) => {
     // Hosted: must be signed in AND on an active plan/trial. Self-host: BYOK keys.
     if (billingEnabled) {
@@ -1168,9 +1228,11 @@ function App() {
     setLogs(["Starting process..."]);
     setLogTimes([Date.now() / 1000]);
     setResults(null);
-    // Studio handovers have no local media object; the preview switches to the
-    // backend-served source once the job id is known.
-    setProcessingMedia(data.type === 'thumbnail_session' ? null : data);
+    // Studio handovers and collector items have no local media object; the
+    // preview switches to the backend-served source once the job id is known.
+    setProcessingMedia(
+      (data.type === 'thumbnail_session' || data.type === 'collector') ? null : data,
+    );
     setQualityGate(null);
     setProjectState(null);
     setNoSource(false);
@@ -1178,60 +1240,7 @@ function App() {
     setFirstVideoJob(false);
 
     try {
-      let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
-
-      // Advanced generation controls: only sent when the user set them, so the
-      // default request stays byte-identical to the pre-feature one.
-      const advanced = {
-        target_clips: data.targetClips || null,
-        clip_min_seconds: data.clipMinSeconds || null,
-        clip_max_seconds: data.clipMaxSeconds || null,
-        // Sent explicitly both ways: absent means off for raw API callers,
-        // but the dashboard always states the user's choice.
-        auto_hook: data.autoHook ? '1' : '0',
-        auto_hook_style: data.autoHook ? (data.autoHookStyle || 'pill') : null,
-        // 'auto' is the server default, so only a deliberate choice travels.
-        layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
-        // Set when the user took the quota wall's "clip the first N minutes"
-        // offer: the server reserves N minutes and cuts the source to them.
-        max_minutes: data.maxMinutes || null,
-        // The stretch picked under the cost line (seconds); absent = whole video.
-        source_start: data.sourceStart ?? null,
-        source_end: data.sourceEnd ?? null,
-      };
-
-      if (data.type === 'url') {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({
-          url: data.payload,
-          acknowledged: !!data.acknowledged,
-          output_format: data.outputFormat || 'auto',
-          force_low_quality: forceLowQuality,
-          ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
-        });
-      } else if (data.type === 'thumbnail_session') {
-        // Handover from Thumbnail Studio (issue #68): the video and transcript
-        // already live server-side, keyed by the Studio session.
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({
-          thumbnail_session_id: data.payload,
-          acknowledged: !!data.acknowledged,
-          output_format: data.outputFormat || 'auto',
-          ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
-        });
-      } else {
-        const formData = new FormData();
-        formData.append('file', data.payload);
-        formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
-        formData.append('output_format', data.outputFormat || 'auto');
-        for (const [k, v] of Object.entries(advanced)) {
-          if (v != null) formData.append(k, v);
-        }
-        body = formData;
-      }
+      const { headers, body } = buildProcessRequest(data, forceLowQuality);
 
       const res = await apiFetch('/api/process', { method: 'POST', headers, body });
 
@@ -1255,7 +1264,7 @@ function App() {
       else if (resData.partial && !resData.partial.chosen && data.maxMinutes == null) {
         track('AutoPartial', { props: { processed: resData.partial.processed_minutes, total: resData.partial.total_minutes } });
       }
-      if (data.type === 'thumbnail_session') {
+      if (data.type === 'thumbnail_session' || data.type === 'collector') {
         setProcessingMedia({ type: 'server', payload: `/api/source/${resData.job_id}` });
       }
       // Minutes are reserved at job start, not at complete.
@@ -1303,6 +1312,125 @@ function App() {
       setLogs(l => [...l, `Error starting job: ${reason}`]);
     }
   };
+
+  // --- Bulk mode -----------------------------------------------------------
+  // One request per video, awaited in order, so the GPU sees exactly the same
+  // one-at-a-time workload a manual run does (MAX_CONCURRENT_JOBS is 1 anyway;
+  // this also keeps per-item progress readable). Clips land in the normal
+  // gallery as each job finishes.
+  const errorText = async (res) => {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      return String(parsed.detail || parsed.error || text);
+    } catch {
+      return text || `HTTP ${res.status}`;
+    }
+  };
+
+  const waitForJob = async (id) => {
+    const started = Date.now();
+    // A 6 h ceiling: a very long source can legitimately take a while, and the
+    // server's own job timeout is the real limit.
+    while (Date.now() - started < 6 * 3600 * 1000) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      try {
+        const res = await apiFetch(`/api/status/${id}`);
+        if (!res.ok) continue;
+        const state = await res.json();
+        const status = String(state.status || '').toLowerCase();
+        if (status === 'completed' || status === 'complete') return 'completed';
+        if (status === 'failed' || status === 'cancelled' || status === 'error') return status;
+      } catch { /* transient poll failure: try again */ }
+    }
+    return 'timeout';
+  };
+
+  const handleProcessBatch = async ({ items, outputFormat, acknowledged, ...options }) => {
+    if (billingEnabled) {
+      if (!isSignedIn) { setShowLogin(true); return; }
+      if (!isManaged) { window.location.hash = '#/pricing'; return; }
+    } else if (keysMissing) {
+      setShowKeyModal(true);
+      return;
+    }
+    const list = items || [];
+    if (!list.length) return;
+    const rows = list.map((item, i) => ({
+      key: `${i}-${item.label || item.payload?.name || ''}`,
+      label: item.label || item.payload?.name
+        || (item.type === 'url' ? item.payload : item.type === 'collector' ? 'collector video' : 'video'),
+      state: 'waiting',
+      jobId: null,
+      error: '',
+    }));
+
+    batchCancelRef.current = false;
+    setBatch({ rows, running: true, startedAt: Date.now() });
+    setActiveTab('dashboard');
+
+    const patch = (index, fields) => setBatch((current) => {
+      if (!current) return current;
+      const nextRows = current.rows.slice();
+      nextRows[index] = { ...nextRows[index], ...fields };
+      return { ...current, rows: nextRows };
+    });
+
+    for (let i = 0; i < list.length; i += 1) {
+      if (batchCancelRef.current) {
+        patch(i, { state: 'cancelled' });
+        continue;
+      }
+      patch(i, { state: 'submitting' });
+      try {
+        const data = {
+          ...list[i],
+          outputFormat,
+          acknowledged: acknowledged !== false,
+          ...options,
+        };
+        const { headers, body } = buildProcessRequest(data);
+        const res = await apiFetch('/api/process', { method: 'POST', headers, body });
+        if (!res.ok) throw new Error(await errorText(res));
+        const payload = await res.json();
+        if (payload.needs_confirmation) {
+          patch(i, { state: 'failed', error: 'Resolution too low — run it alone to confirm.' });
+          continue;
+        }
+        patch(i, { state: 'running', jobId: payload.job_id });
+        const final = await waitForJob(payload.job_id);
+        if (final === 'completed') patch(i, { state: 'done' });
+        else patch(i, { state: 'failed', error: `job ${final}` });
+      } catch (e) {
+        patch(i, { state: 'failed', error: String(e.message || e).slice(0, 300) });
+      }
+    }
+    setBatch((current) => (current ? { ...current, running: false } : current));
+    refreshMe();
+  };
+
+  const BATCH_DEFAULTS = {
+    outputFormat: 'vertical',
+    acknowledged: true,
+    autoHook: true,
+    autoHookStyle: 'pill',
+    layout: 'auto',
+  };
+
+  const processCollectorItem = (item) => handleProcess({
+    ...BATCH_DEFAULTS,
+    type: 'collector',
+    payload: item.id,
+  });
+
+  const processCollectorQueue = (items) => handleProcessBatch({
+    ...BATCH_DEFAULTS,
+    items: (items || []).map((item) => ({
+      type: 'collector', payload: item.id, label: item.title,
+    })),
+  });
+
+  const stopBatch = () => { batchCancelRef.current = true; };
 
   // Resume the job the visitor started before signing in. Runs on the render
   // that first sees isSignedIn true — after a magic link or a Google round trip,
@@ -1362,9 +1490,10 @@ function App() {
     { id: 'home', ord: '00', icon: Home, label: 'Home', short: 'home', primary: true },
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
-    { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
-    { id: 'thumbnails', ord: '04', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
-    { id: 'settings', ord: '05', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'collector', ord: '03', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
+    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
+    { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio' },
+    { id: 'settings', ord: '06', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -2053,8 +2182,26 @@ function App() {
             </div>
           )}
 
+          {/* View: Collector — the shelf of videos to clip later */}
+          {activeTab === 'collector' && (
+            <Collector
+              onProcessItem={processCollectorItem}
+              onProcessQueue={processCollectorQueue}
+            />
+          )}
+
+          {/* View: Bulk mode progress — replaces the single-video view */}
+          {activeTab === 'dashboard' && batch && (
+            <BatchQueue
+              batch={batch}
+              onCancel={stopBatch}
+              onOpenGallery={() => goToTab('gallery')}
+              onDismiss={() => { setBatch(null); setStatus('idle'); }}
+            />
+          )}
+
           {/* View: Dashboard (Idle) */}
-          {activeTab === 'dashboard' && status === 'idle' && (
+          {activeTab === 'dashboard' && !batch && status === 'idle' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="min-h-full flex flex-col items-center justify-center px-4 py-5 sm:p-6">
               {/* On a phone the hero used to fill the fold on its own and push
@@ -2085,7 +2232,11 @@ function App() {
                   )}
                 </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                <MediaInput
+                  onProcess={handleProcess}
+                  onProcessBatch={handleProcessBatch}
+                  isProcessing={status === 'processing' || !!batch?.running}
+                />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
@@ -2098,7 +2249,7 @@ function App() {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
+          {activeTab === 'dashboard' && !batch && (status === 'processing' || status === 'complete' || status === 'error') && (
             <div className="h-full flex flex-col md:flex-row gap-3 md:gap-4 p-3 md:p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
 
               {/* Left Panel: Preview & Status */}

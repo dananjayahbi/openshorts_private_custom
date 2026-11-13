@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film } from 'lucide-react';
 import { track } from '../lib/analytics';
+import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
+import CollectorPicker from './CollectorPicker';
 
 const SUPPORTED_PLATFORMS = [
     'YouTube', 'Vimeo', 'TikTok', 'X / Twitter', 'Twitch', 'Kick',
@@ -30,14 +32,20 @@ const readVideoDuration = (file) => new Promise((resolve) => {
     } catch { resolve(null); }
 });
 
-export default function MediaInput({ onProcess, isProcessing }) {
+const fileKey = (f) => `${f.name}:${f.size}:${f.lastModified}`;
+
+export default function MediaInput({ onProcess, onProcessBatch, isProcessing }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
-    // File upload is the primary path; the link is secondary.
-    const [mode, setMode] = useState('file'); // 'file' | 'url'
+    // File upload is the primary path; the link and the collector are next.
+    const [mode, setMode] = useState('file'); // 'file' | 'url' | 'collector'
+    // Bulk mode: the same source tab, but N videos submitted one after another.
+    const [bulk, setBulk] = useState(false);
     const [url, setUrl] = useState('');
-    const [file, setFile] = useState(null);
-    const [fileSeconds, setFileSeconds] = useState(null);
-    const fileTooShort = fileSeconds != null && fileSeconds < MIN_SOURCE_SECONDS;
+    const [urlsText, setUrlsText] = useState('');
+    const [files, setFiles] = useState([]);
+    const [durations, setDurations] = useState({});
+    const [picked, setPicked] = useState([]);
+    const [pickerOpen, setPickerOpen] = useState(false);
     const [acknowledged, setAcknowledged] = useState(false);
     // {start, end} in seconds when the user picked a stretch under the cost line.
     const [range, setRange] = useState(null);
@@ -64,7 +72,18 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    const [queuedCount, setQueuedCount] = useState(0);
+    const [queueError, setQueueError] = useState('');
     const infoRef = useRef(null);
+    const fileInput = useRef(null);
+
+    const singleFile = files[0] || null;
+    const fileSeconds = singleFile ? durations[fileKey(singleFile)] ?? null : null;
+    const fileTooShort = fileSeconds != null && fileSeconds < MIN_SOURCE_SECONDS;
+    const bulkUrls = urlsText.split('\n').map((s) => s.trim()).filter(Boolean);
+    const shortFiles = bulk
+        ? files.filter((f) => durations[fileKey(f)] != null && durations[fileKey(f)] < MIN_SOURCE_SECONDS)
+        : [];
 
     // Close the compatibility popover on any outside click.
     useEffect(() => {
@@ -76,19 +95,31 @@ export default function MediaInput({ onProcess, isProcessing }) {
         return () => document.removeEventListener('mousedown', onClick);
     }, [showInfo]);
 
+    // Duration for every picked file (the first one also drives the cost line).
     useEffect(() => {
         let cancelled = false;
-        setFileSeconds(null);
-        if (!file) return undefined;
-        readVideoDuration(file).then((d) => {
-            if (cancelled) return;
-            setFileSeconds(d);
-            if (d != null && d < MIN_SOURCE_SECONDS) {
-                track('SourceTooShort', { props: { seconds: String(Math.round(d)) } });
+        setDurations((prev) => {
+            const next = { ...prev };
+            for (const f of files) {
+                if (!(fileKey(f) in next)) next[fileKey(f)] = null;
             }
+            return next;
         });
+        (async () => {
+            for (const f of files) {
+                const key = fileKey(f);
+                if (durations[key] !== undefined && durations[key] !== null) continue;
+                const d = await readVideoDuration(f);
+                if (cancelled) return;
+                setDurations((prev) => ({ ...prev, [key]: d }));
+                if (d != null && d < MIN_SOURCE_SECONDS) {
+                    track('SourceTooShort', { props: { seconds: String(Math.round(d)) } });
+                }
+            }
+        })();
         return () => { cancelled = true; };
-    }, [file]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [files]);
 
     useEffect(() => {
         fetch(getApiUrl('/api/config'))
@@ -117,42 +148,137 @@ export default function MediaInput({ onProcess, isProcessing }) {
         }
     }, []);
 
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        if (!acknowledged) return;
-        const advanced = {
-            targetClips: targetClips || null,
-            clipMinSeconds: clipMinSeconds || null,
-            clipMaxSeconds: clipMaxSeconds || null,
-            autoHook,
-            autoHookStyle,
-            layout,
-            sourceStart: range ? Math.round(range.start) : null,
-            sourceEnd: range ? Math.round(range.end) : null,
-        };
+    // The collector queue lives in the backend; refresh the count on arrival
+    // and after any bulk switch so the button tells the truth.
+    const refreshQueue = async () => {
+        try {
+            const res = await apiFetch('/api/collector');
+            if (!res.ok) return;
+            const data = await res.json();
+            setQueuedCount((data.items || []).filter((i) => i.queued).length);
+        } catch { /* the count is cosmetic */ }
+    };
+    useEffect(() => { refreshQueue(); }, [mode, bulk]);
+
+    const advanced = () => ({
+        targetClips: targetClips || null,
+        clipMinSeconds: clipMinSeconds || null,
+        clipMaxSeconds: clipMaxSeconds || null,
+        autoHook,
+        autoHookStyle,
+        layout,
+        sourceStart: range ? Math.round(range.start) : null,
+        sourceEnd: range ? Math.round(range.end) : null,
+    });
+
+    const rememberOptions = () => {
         try {
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
             localStorage.setItem('os_layout', layout);
         } catch { /* ignore */ }
-        if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...advanced });
-        } else if (mode === 'file' && file && !fileTooShort) {
-            onProcess({ type: 'file', payload: file, acknowledged: true, outputFormat, ...advanced });
+    };
+
+    const setBulkMode = (next) => {
+        setBulk(next);
+        if (!next) {
+            setFiles((prev) => prev.slice(0, 1));
+            setPicked((prev) => prev.slice(0, 1));
         }
     };
 
-    const handleDrop = (e) => {
+    const handleSubmit = (e) => {
         e.preventDefault();
-        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-            setFile(e.dataTransfer.files[0]);
-            setMode('file');
+        if (!acknowledged) return;
+        rememberOptions();
+        const options = advanced();
+
+        if (bulk) {
+            let items = [];
+            if (mode === 'url') {
+                items = bulkUrls.map((u) => ({ type: 'url', payload: u, label: u }));
+            } else if (mode === 'file') {
+                items = files.map((f) => ({ type: 'file', payload: f, label: f.name }));
+            } else {
+                items = picked.map((i) => ({ type: 'collector', payload: i.id, label: i.title }));
+            }
+            if (!items.length) return;
+            onProcessBatch?.({ items, outputFormat, acknowledged: true, ...options });
+            return;
+        }
+
+        if (mode === 'url' && url) {
+            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...options });
+        } else if (mode === 'file' && singleFile && !fileTooShort) {
+            onProcess({ type: 'file', payload: singleFile, acknowledged: true, outputFormat, ...options });
+        } else if (mode === 'collector' && picked[0]) {
+            onProcess({ type: 'collector', payload: picked[0].id, acknowledged: true, outputFormat, ...options });
         }
     };
+
+    const startQueue = async () => {
+        setQueueError('');
+        try {
+            const res = await apiFetch('/api/collector');
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            const queued = (data.items || []).filter((i) => i.queued);
+            if (!queued.length) {
+                setQueueError('The queue is empty. Add videos to it on the Collector page.');
+                return;
+            }
+            if (!acknowledged) {
+                setQueueError('Tick the rights confirmation below first.');
+                return;
+            }
+            rememberOptions();
+            onProcessBatch?.({
+                items: queued.map((i) => ({ type: 'collector', payload: i.id, label: i.title })),
+                outputFormat,
+                acknowledged: true,
+                ...advanced(),
+            });
+        } catch (e) {
+            setQueueError(String(e.message || e).slice(0, 240));
+        }
+    };
+
+    const addFiles = (list) => {
+        const incoming = Array.from(list || []).filter((f) => f && f.type.startsWith('video/'));
+        if (!incoming.length) return;
+        setFiles((prev) => (bulk ? [...prev, ...incoming] : [incoming[0]]));
+        setMode('file');
+    };
+
+    const removeFile = (index) => {
+        setFiles((prev) => prev.filter((_, i) => i !== index));
+    };
+
+    const canSubmit = acknowledged && (
+        (mode === 'url' && (bulk ? bulkUrls.length > 0 : !!url))
+        || (mode === 'file' && (bulk ? files.length > 0 : (!!singleFile && !fileTooShort)))
+        || (mode === 'collector' && picked.length > 0)
+    );
 
     return (
         <div className="card p-4 sm:p-6 animate-fade">
-            <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule" data-tutorial="source-tabs">
+            {/* Bulk switch: one toggle for all three source tabs. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <p className="text-sm text-ink2">
+                    {bulk ? 'Bulk mode: several videos are processed one by one.' : 'Single video'}
+                </p>
+                <label className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none">
+                    <input
+                        type="checkbox"
+                        checked={bulk}
+                        onChange={(e) => setBulkMode(e.target.checked)}
+                        className="w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+                    />
+                    bulk mode
+                </label>
+            </div>
+
+            <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule overflow-x-auto" data-tutorial="source-tabs">
                 <button
                     onClick={() => setMode('file')}
                     className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'file'
@@ -175,97 +301,200 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         Video URL
                     </button>
                 )}
+                <button
+                    onClick={() => setMode('collector')}
+                    className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'collector'
+                        ? 'text-ink border-brass'
+                        : 'text-muted border-transparent hover:text-ink2'
+                        }`}
+                >
+                    <Layers size={16} className={`hidden sm:block ${mode === 'collector' ? 'text-brass' : ''}`} />
+                    Collector
+                </button>
             </div>
 
             <form onSubmit={handleSubmit}>
                 {mode === 'url' ? (
                     <div className="space-y-4" data-tutorial="drop-zone">
-                        <div className="relative">
-                            <input
-                                type="url"
-                                value={url}
-                                onChange={(e) => setUrl(e.target.value)}
-                                placeholder="https://... paste a video link"
-                                className="input-field pr-11"
-                                required
-                            />
-                            <div className="absolute inset-y-0 right-2 flex items-center" ref={infoRef}>
+                        {bulk ? (
+                            <div>
+                                <textarea
+                                    value={urlsText}
+                                    onChange={(e) => setUrlsText(e.target.value)}
+                                    placeholder={'One video link per line\nhttps://youtu.be/...\nhttps://...'}
+                                    rows={5}
+                                    className="input-field font-mono text-xs leading-relaxed resize-y"
+                                />
+                                <p className="readout mt-2">{bulkUrls.length} link(s) queued for this batch</p>
+                            </div>
+                        ) : (
+                            <div className="relative">
+                                <input
+                                    type="url"
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="https://... paste a video link"
+                                    className="input-field pr-11"
+                                    required
+                                />
+                                <div className="absolute inset-y-0 right-2 flex items-center" ref={infoRef}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowInfo((v) => !v)}
+                                        aria-label="Supported platforms"
+                                        className="p-1.5 text-muted hover:text-brass transition-colors"
+                                    >
+                                        <Info size={16} />
+                                    </button>
+                                    {showInfo && (
+                                        <div className="absolute right-0 top-full mt-2 w-64 z-20 card p-4 text-left animate-fade">
+                                            <p className="eyebrow mb-2">Paste a link from</p>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {SUPPORTED_PLATFORMS.map((p) => (
+                                                    <span key={p} className="text-xs px-2 py-0.5 rounded-full bg-paper3 text-ink2">
+                                                        {p}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            <p className="text-xs text-muted mt-2.5 leading-relaxed">
+                                                …and 1,000+ more sites. If a link has a public video, we can usually fetch it.
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                ) : mode === 'collector' ? (
+                    <div className="space-y-3" data-tutorial="drop-zone">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => setPickerOpen(true)}
+                                className="btn-quiet text-xs py-2 px-3"
+                            >
+                                <Layers size={14} /> {bulk ? 'select from collector gallery' : 'select from collector gallery'}
+                            </button>
+                            {queuedCount > 0 && (
                                 <button
                                     type="button"
-                                    onClick={() => setShowInfo((v) => !v)}
-                                    aria-label="Supported platforms"
-                                    className="p-1.5 text-muted hover:text-brass transition-colors"
+                                    onClick={startQueue}
+                                    className="btn-primary text-xs py-2 px-3"
+                                    title="Process every queued video, one at a time"
                                 >
-                                    <Info size={16} />
+                                    <ListPlus size={14} /> process queue ({queuedCount})
                                 </button>
-                                {showInfo && (
-                                    <div className="absolute right-0 top-full mt-2 w-64 z-20 card p-4 text-left animate-fade">
-                                        <p className="eyebrow mb-2">Paste a link from</p>
-                                        <div className="flex flex-wrap gap-1.5">
-                                            {SUPPORTED_PLATFORMS.map((p) => (
-                                                <span key={p} className="text-xs px-2 py-0.5 rounded-full bg-paper3 text-ink2">
-                                                    {p}
-                                                </span>
-                                            ))}
-                                        </div>
-                                        <p className="text-xs text-muted mt-2.5 leading-relaxed">
-                                            …and 1,000+ more sites. If a link has a public video, we can usually fetch it.
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
+                            )}
                         </div>
+                        {picked.length === 0 ? (
+                            <div className="border-2 border-dashed border-rule2 rounded-card p-6 sm:p-8 text-center">
+                                <Film size={18} className="mx-auto mb-2 text-muted" />
+                                <p className="text-ink2 lowercase">no video selected</p>
+                                <p className="readout mt-2">
+                                    Open the gallery to pick {bulk ? 'one or more videos' : 'a video'}.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {picked.map((item, i) => (
+                                    <div key={item.id} className="flex items-center gap-2 p-2 rounded-input border border-rule2 bg-paper2 min-w-0">
+                                        {item.thumbnail ? (
+                                            <img src={getApiUrl(item.thumbnail)} alt="" className="w-14 h-9 rounded object-cover shrink-0" />
+                                        ) : (
+                                            <div className="w-14 h-9 rounded bg-paper3 flex items-center justify-center shrink-0 text-muted">
+                                                <Film size={14} />
+                                            </div>
+                                        )}
+                                        <p className="text-xs truncate flex-1" title={item.title}>{item.title}</p>
+                                        <button
+                                            type="button"
+                                            onClick={() => setPicked((prev) => prev.filter((_, idx) => idx !== i))}
+                                            className="p-1 text-muted hover:text-ink shrink-0"
+                                            aria-label="Remove from selection"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {queueError && <p className="text-xs text-danger" role="alert">{queueError}</p>}
                     </div>
                 ) : (
                     <div
                         data-tutorial="drop-zone"
-                        className={`border-2 border-dashed rounded-card p-6 sm:p-8 text-center transition-colors ${file ? 'border-brass' : 'border-rule2 hover:border-brass'
+                        className={`border-2 border-dashed rounded-card p-6 sm:p-8 text-center transition-colors ${files.length ? 'border-brass' : 'border-rule2 hover:border-brass'
                             }`}
                         onDragOver={(e) => e.preventDefault()}
-                        onDrop={handleDrop}
+                        onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
                     >
-                        {file ? (
-                            <div className="flex items-center justify-center gap-3 text-ok min-w-0">
-                                <FileVideo size={18} className="shrink-0" />
-                                <span className="font-medium truncate">{file.name}</span>
-                                <button
-                                    type="button"
-                                    onClick={() => setFile(null)}
-                                    className="p-1 text-muted hover:text-ink hover:bg-paper3 rounded-full transition-colors"
-                                >
-                                    <X size={16} />
-                                </button>
+                        {files.length > 0 && (
+                            <div className="space-y-2 mb-4 text-left">
+                                {files.map((f, i) => (
+                                    <div key={fileKey(f)} className="flex items-center justify-center gap-2 text-ok min-w-0">
+                                        <FileVideo size={16} className="shrink-0" />
+                                        <span className="text-sm font-medium truncate">{f.name}</span>
+                                        {bulk && (
+                                            <button
+                                                type="button"
+                                                onClick={() => removeFile(i)}
+                                                className="p-1 text-muted hover:text-ink hover:bg-paper3 rounded-full transition-colors shrink-0"
+                                                aria-label={`Remove ${f.name}`}
+                                            >
+                                                <X size={14} />
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
                             </div>
-                        ) : null}
-                        {file && fileTooShort ? (
+                        )}
+                        {!bulk && singleFile && fileTooShort ? (
                             <p className="text-danger text-sm mt-3" role="alert">
                                 This video is {Math.round(fileSeconds)}s long. Clip generation needs at least {MIN_SOURCE_SECONDS}s
                                 of footage to cut from: it already is a short. Pick a longer video.
                             </p>
                         ) : null}
-                        {!file && (
-                            <label className="cursor-pointer block">
-                                <input
-                                    type="file"
-                                    accept="video/*"
-                                    onChange={(e) => setFile(e.target.files?.[0] || null)}
-                                    className="hidden"
-                                />
-                                <Upload className="mx-auto mb-3 text-muted" size={18} />
-                                <p className="text-ink2 lowercase">Click to upload or drag and drop</p>
-                                <p className="readout mt-2">MP4, MOV up to 500MB · at least {MIN_SOURCE_SECONDS}s long</p>
-                            </label>
+                        {shortFiles.length > 0 && (
+                            <p className="text-danger text-xs mt-2" role="alert">
+                                {shortFiles.length} file(s) are shorter than {MIN_SOURCE_SECONDS}s and will fail:
+                                {' '}{shortFiles.map((f) => f.name).join(', ')}
+                            </p>
                         )}
+                        <input
+                            ref={fileInput}
+                            type="file"
+                            accept="video/*"
+                            multiple={bulk}
+                            onChange={(e) => addFiles(e.target.files)}
+                            className="hidden"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => fileInput.current?.click()}
+                            className={files.length ? 'btn-quiet text-xs py-2 px-3 mt-2' : 'block w-full'}
+                        >
+                            <Upload className={`mx-auto mb-2 text-muted ${files.length ? 'hidden' : ''}`} size={18} />
+                            <span className={files.length ? '' : 'text-ink2 lowercase'}>
+                                {files.length ? `add ${bulk ? 'more files' : 'another file'}` : 'Click to upload or drag and drop'}
+                            </span>
+                            {!files.length && (
+                                <span className="readout block mt-2">
+                                    MP4, MOV up to {bulk ? '2 GB each' : '500MB'} · at least {MIN_SOURCE_SECONDS}s long
+                                </span>
+                            )}
+                        </button>
                     </div>
                 )}
 
-                <SourceCost
-                    mode={mode}
-                    url={url}
-                    fileSeconds={fileSeconds}
-                    range={range}
-                    onRangeChange={setRange}
-                />
+                {!bulk && mode !== 'collector' && (
+                    <SourceCost
+                        mode={mode}
+                        url={url}
+                        fileSeconds={fileSeconds}
+                        range={range}
+                        onRangeChange={setRange}
+                    />
+                )}
 
                 {/* Output format selector */}
                 <div className="mt-5" data-tutorial="output-format">
@@ -419,7 +648,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 <button
                     type="submit"
                     data-tutorial="generate"
-                    disabled={isProcessing || !acknowledged || (mode === 'url' && !url) || (mode === 'file' && (!file || fileTooShort))}
+                    disabled={isProcessing || !canSubmit}
                     className="w-full btn-primary mt-4"
                 >
                     {isProcessing ? (
@@ -429,11 +658,23 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </>
                     ) : (
                         <>
-                            Generate Clips
+                            {bulk
+                                ? `Process ${mode === 'url' ? bulkUrls.length : mode === 'file' ? files.length : picked.length || ''} video(s) one by one`
+                                : 'Generate Clips'}
                         </>
                     )}
                 </button>
             </form>
+
+            <CollectorPicker
+                open={pickerOpen}
+                multi={bulk}
+                onClose={() => setPickerOpen(false)}
+                onConfirm={(items) => {
+                    setPicked(bulk ? items : items.slice(0, 1));
+                    setPickerOpen(false);
+                }}
+            />
         </div>
     );
 }

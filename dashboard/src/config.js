@@ -11,7 +11,7 @@ export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 let mediaToken = '';
 export const setMediaToken = (token) => { mediaToken = token || ''; };
 
-const MEDIA_PREFIXES = ['/videos/', '/thumbnails/'];
+const MEDIA_PREFIXES = ['/videos/', '/thumbnails/', '/collector/'];
 
 // Append a query parameter whether or not the URL already has a query.
 export const withParam = (url, key, value) => {

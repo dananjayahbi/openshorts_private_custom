@@ -62,6 +62,34 @@ Storage/
 - The folder is git-ignored. The old `output/` and `uploads/` trees were
   removed when this layout landed.
 
+## Collector — find now, process later
+
+A new **Collector** page separates finding videos from clipping them:
+
+- **Add a link**: only metadata and the thumbnail are fetched (tens of KB), no
+  video bytes. The card shows the title, channel, duration and "link only".
+- **Download**: fetches the video into `Storage/collector/files` when you are
+  ready; the card switches to "on disk".
+- **Upload**: a local file is stored immediately (`Storage/collector/files`)
+  with a poster frame.
+- **Queue**: any card can be put in the queue. "Process queue" processes them
+  one at a time, in order.
+
+In the Clip Generator, source tab **Collector** opens a full-viewport picker
+over the shelf. **Bulk Mode** applies to all three sources — several uploads,
+one URL per line, or a multi-select from the collector — and the batch runs
+sequentially with per-item progress (the Clips land in the Clip Gallery as each
+job finishes). The queue button works from either the Collector page or the
+Clip Generator.
+
+| Piece | Where |
+|---|---|
+| Index (not served) | `Storage/collector/items.json` |
+| Videos | `Storage/collector/files/<item>_<name>.mp4` |
+| Posters | `Storage/collector/thumbs/<item>.jpg`, served at `/collector/thumbs/...` |
+| API | `GET/POST /api/collector`, `POST /api/collector/upload`, `POST /api/collector/{id}/download`, `POST /api/collector/{id}/queue`, `DELETE /api/collector/{id}` |
+| Processing | `POST /api/process` accepts `collector_id`; a downloaded file is hardlinked into the job, so the collector keeps its copy |
+
 ### What made native possible
 
 Five POSIX-only behaviours (seven call sites), all sealed in
