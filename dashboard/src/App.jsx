@@ -1826,7 +1826,11 @@ function App() {
 
           {/* View: Settings */}
           {activeTab === 'settings' && (
-            <div className="h-full overflow-y-auto p-4 sm:p-8 max-w-2xl mx-auto animate-fade">
+            /* The scroller is full width; the reading column inside it is what
+               is capped. A capped scroller puts its scrollbar in the middle of
+               the screen instead of at the window edge. */
+            <div className="h-full w-full overflow-y-auto overscroll-contain animate-fade">
+              <div className="max-w-2xl mx-auto p-4 sm:p-8">
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
                 <div>
                   <p className="eyebrow mb-1.5">08 · SETTINGS</p>
@@ -2056,12 +2060,13 @@ function App() {
                   </div>
                 </div>
               </div>
+              </div>
             </div>
           )}
 
           {/* View: AI Agent */}
           {activeTab === 'ai-agent' && (
-            <div className="h-full overflow-y-auto custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
+            <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-4 sm:p-6 md:p-10 animate-fade">
               <div className="max-w-4xl mx-auto space-y-8">
 
                 {/* Header */}
@@ -2175,11 +2180,29 @@ function App() {
             </div>
           )}
 
-          {/* View: Clip Gallery — every clip this instance has rendered */}
+          {/* View: Clip Gallery — every clip this instance has rendered.
+              Gallery owns the scroller: wrapping it in another one double-scrolled
+              and the infinite-scroll observer never saw its sentinel. */}
           {activeTab === 'gallery' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+            <div className="h-full animate-fade">
               <Gallery />
             </div>
+          )}
+
+          {/* View: YouTube Studio (thumbnail studio) */}
+          {activeTab === 'thumbnails' && (
+            <ThumbnailStudio
+              geminiApiKey={apiKey}
+              uploadPostKey={uploadPostKey}
+              uploadUserId={uploadUserId}
+              managed={isManaged}
+              onCreateClips={(sessionId) => {
+                setActiveTab('dashboard');
+                // The Studio source is the user's own upload, published to their
+                // own channel; the handover carries that same attestation.
+                handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
+              }}
+            />
           )}
 
           {/* View: Collector — the shelf of videos to clip later */}
@@ -2202,7 +2225,7 @@ function App() {
 
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && !batch && status === 'idle' && (
-            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+            <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
               <div className="min-h-full flex flex-col items-center justify-center px-4 py-5 sm:p-6">
               {/* On a phone the hero used to fill the fold on its own and push
                   the uploader — the whole point of the screen — below it. The
@@ -2250,7 +2273,7 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && !batch && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row gap-3 md:gap-4 p-3 md:p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
+            <div className="h-full flex flex-col md:flex-row gap-3 md:gap-4 p-3 md:p-4 overflow-y-auto md:overflow-y-hidden overscroll-contain custom-scrollbar animate-fade">
 
               {/* Left Panel: Preview & Status */}
               <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-3.5 sm:p-6 md:overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>

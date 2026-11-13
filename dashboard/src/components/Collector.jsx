@@ -249,7 +249,7 @@ export default function Collector({ onProcessItem, onProcessQueue }) {
     const downloading = items.some((i) => i.state === 'downloading');
 
     return (
-        <div className="h-full overflow-y-auto custom-scrollbar">
+        <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar">
             <div className="w-full px-3 sm:px-6 py-4 sm:py-6">
                 <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
                     <div>

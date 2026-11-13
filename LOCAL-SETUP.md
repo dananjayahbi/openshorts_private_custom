@@ -27,6 +27,11 @@ equivalent (hidden windows, output in `logs\`), useful for automation.
 Logs land in `logs\api.log`, `logs\dashboard.log`, `logs\renderer.log` when
 started with `start-native.ps1`.
 
+The dashboard is a single-viewport shell: the top bar and phone tab bar stay
+put, and each page scrolls inside its own pane (never the document). Panes
+contain their scroll (`overscroll-contain`), so a wheel or swipe at the end of
+one page cannot drag the shell behind it.
+
 The venv lives **outside the repo** (`F:\openshorts-venv`, override with
 `OPENSHORTS_VENV`) so the repo drive keeps its free space for rendered clips.
 The pip cache is `F:\pip-cache`. Both are deliberately off the E: volume.
