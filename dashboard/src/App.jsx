@@ -325,12 +325,6 @@ function App() {
     return '';
   });
 
-  // fal.ai API State - Load encrypted
-  const [falKey, setFalKey] = useState(() => {
-    const stored = localStorage.getItem('falKey_v1');
-    if (stored) return decrypt(stored);
-    return '';
-  });
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
@@ -782,12 +776,6 @@ function App() {
       localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
     }
   }, [elevenLabsKey]);
-
-  useEffect(() => {
-    if (falKey) {
-      localStorage.setItem('falKey_v1', encrypt(falKey));
-    }
-  }, [falKey]);
 
   useEffect(() => {
     if ((uploadPostKey || isManaged) && userProfiles.length === 0) {
@@ -1491,7 +1479,7 @@ function App() {
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
     { id: 'collector', ord: '03', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
-    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
+    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent' },
     { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio' },
     { id: 'settings', ord: '06', icon: Settings, label: 'Settings', short: 'settings' },
   ];
@@ -1856,17 +1844,9 @@ function App() {
                   </div>
                   <p className="text-xs text-muted mb-5 leading-relaxed">
                     Your plan includes the <strong>Clip Generator</strong> and <strong>YouTube Studio</strong>,
-                    fully managed — no API keys required. AI Shorts &amp; dubbing use your own fal.ai / ElevenLabs
-                    keys (below). Connect your social accounts to publish directly.
+                    fully managed — no API keys required. Clips are downloaded and uploaded by hand
+                    on this local build.
                   </p>
-                  <div className="flex flex-wrap gap-2">
-                    <button onClick={handleConnectSocials} className="btn-primary py-2 px-4 text-sm">
-                      <Share2 size={16} /> Connect social accounts
-                    </button>
-                    <button onClick={handleOpenCalendar} className="btn-quiet py-2 px-4 text-sm">
-                      <Calendar size={16} /> Content calendar
-                    </button>
-                  </div>
                 </div>
               ) : billingEnabled ? (
                 <div className="card p-6 mb-2">
@@ -1887,179 +1867,8 @@ function App() {
                   </button>
                 </div>
               ) : (
-                <>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
-
-              <div className="card p-4 sm:p-6 mt-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Share2 size={16} className="text-brass" />
-                    </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
-                  </div>
-                  <span className="readout bg-paper3 px-2 py-0.5 rounded-full">optional</span>
-                </div>
-                <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Only needed to publish straight to TikTok, Instagram Reels and YouTube Shorts via <strong>Upload-Post</strong>.
-                  Without it you download the clips and upload them yourself — nothing else changes.
-                  Includes a <strong>free tier</strong> (no credit card required).
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-muted">Upload-Post API Key</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={uploadPostKey}
-                      onChange={(e) => setUploadPostKey(e.target.value)}
-                      className="input-field"
-                      placeholder="ey..."
-                    />
-                    <button onClick={fetchUserProfiles} className="btn-quiet py-2 px-4 text-sm">
-                      Connect
-                    </button>
-                  </div>
-                  <div className="text-xs text-muted leading-relaxed">
-                    Connect your Upload-Post account to enable one-click publishing.
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">1. Login</span>
-                        <span className="text-xs text-muted">Register account</span>
-                      </a>
-                      <a href="https://app.upload-post.com/manage-users" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">2. Profiles</span>
-                        <span className="text-xs text-muted">Create & Connect</span>
-                      </a>
-                      <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">3. API Key</span>
-                        <span className="text-xs text-muted">Generate key</span>
-                      </a>
-                    </div>
-                    <br />
-                    <span className="text-muted">
-                      Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-                </>
+                <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
               )}
-
-              <div className="card p-4 sm:p-6 mt-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Globe size={16} className="text-brass" />
-                    </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Video Translation</h2>
-                  </div>
-                  <span className="readout">BYOK</span>
-                </div>
-                <p className="text-xs text-muted mb-6 leading-relaxed">
-                  For <strong>AI Shorts &amp; dubbing</strong> — bring your own key. Translate your clips to different
-                  languages using <strong>ElevenLabs</strong> AI dubbing (billed by ElevenLabs). Not covered by your plan.
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-muted">ElevenLabs API Key</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={elevenLabsKey}
-                      onChange={(e) => setElevenLabsKey(e.target.value)}
-                      className="input-field"
-                      placeholder="sk_..."
-                    />
-                    <button
-                      onClick={() => {
-                        if (elevenLabsKey) {
-                          localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
-                          setElevenLabsSaved(true);
-                          setTimeout(() => setElevenLabsSaved(false), 2000);
-                        }
-                      }}
-                      className={elevenLabsSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
-                    >
-                      {elevenLabsSaved ? <><Check size={12} /> saved</> : 'Save'}
-                    </button>
-                  </div>
-                  <div className="text-xs text-muted leading-relaxed">
-                    Get your API key from ElevenLabs to enable video translation.
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <a href="https://elevenlabs.io/sign-up" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">1. Sign Up</span>
-                        <span className="text-xs text-muted">Create account</span>
-                      </a>
-                      <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">2. API Key</span>
-                        <span className="text-xs text-muted">Generate key</span>
-                      </a>
-                    </div>
-                    <br />
-                    <span className="text-muted">
-                      Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="card p-4 sm:p-6 mt-8">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                      <Sparkles size={16} className="text-brass" />
-                    </div>
-                    <h2 className="text-base font-medium text-ink lowercase">AI Shorts (UGC Videos)</h2>
-                  </div>
-                  <span className="readout">BYOK</span>
-                </div>
-                <p className="text-xs text-muted mb-6 leading-relaxed">
-                  Generate UGC-style videos with AI actors for any product or business using <strong>fal.ai</strong>.
-                  <strong> Not covered by your plan</strong> — bring your own fal.ai + ElevenLabs keys (billed by those
-                  providers, ~$0.65-2 per video). Your plan still covers the AI script &amp; orchestration.
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-muted">fal.ai API Key</label>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={falKey}
-                      onChange={(e) => setFalKey(e.target.value)}
-                      className="input-field"
-                      placeholder="fal_..."
-                    />
-                    <button
-                      onClick={() => {
-                        if (falKey) {
-                          localStorage.setItem('falKey_v1', encrypt(falKey));
-                          setFalSaved(true);
-                          setTimeout(() => setFalSaved(false), 2000);
-                        }
-                      }}
-                      className={falSaved ? 'badge-ok px-4' : 'btn-quiet py-2 px-4 text-sm'}
-                    >
-                      {falSaved ? <><Check size={12} /> saved</> : 'Save'}
-                    </button>
-                  </div>
-                  <div className="text-xs text-muted leading-relaxed">
-                    Get your API key from fal.ai to enable AI actor video generation.
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">1. Sign Up</span>
-                        <span className="text-xs text-muted">Create fal.ai account</span>
-                      </a>
-                      <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-rule rounded-input hover:bg-paper3 transition-colors flex flex-col gap-1">
-                        <span className="text-ink2 font-medium">2. API Key</span>
-                        <span className="text-xs text-muted">Generate key</span>
-                      </a>
-                    </div>
-                    <br />
-                    <span className="text-muted">
-                      Keys are only stored in your browser. Sent to backend only to process requests.
-                    </span>
-                  </div>
-                </div>
-              </div>
               </div>
             </div>
           )}

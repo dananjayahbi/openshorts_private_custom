@@ -385,7 +385,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
   // --- Publish to YouTube ---
   const handlePublish = async () => {
-    if (!managed && (!uploadPostKey || !uploadUserId)) return alert('Please configure your Upload-Post API key and user in Settings first.');
+    if (!managed && (!uploadPostKey || !uploadUserId)) return alert('Publishing is disabled in this local build. Download the thumbnail and upload it yourself.');
     const finalTitle = selectedTitle || manualTitle;
     if (!finalTitle) return alert('No title selected.');
     if (!selectedThumbnail) return alert('Please select a thumbnail first.');
@@ -1144,22 +1144,19 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
                 />
               </div>
 
-              {/* Publish Button */}
+              {/* Publish Button. This local build uploads clips/thumbnails by
+                  hand, so an unconfigured Upload-Post is a plain notice, not a
+                  link to a settings section that no longer exists. */}
               {(!managed && (!uploadPostKey || !uploadUserId)) ? (
                 <div className="glass-panel p-6 space-y-3">
-                  <div className="flex items-center gap-2 text-warn">
+                  <div className="flex items-center gap-2 text-muted">
                     <AlertCircle size={16} />
-                    <span className="text-sm font-medium lowercase">Upload-Post Not Configured</span>
+                    <span className="text-sm font-medium lowercase">Publishing is off</span>
                   </div>
                   <p className="text-xs text-muted">
-                    To publish directly to YouTube, configure your Upload-Post API key and connect a profile in Settings.
+                    This local build does not publish to YouTube. Download the thumbnail and
+                    use it with your own upload — nothing else on this page changes.
                   </p>
-                  <button
-                    onClick={() => { }}
-                    className="text-xs lowercase text-brass hover:underline flex items-center gap-1"
-                  >
-                    <Settings size={12} /> Go to Settings
-                  </button>
                 </div>
               ) : (
                 <button

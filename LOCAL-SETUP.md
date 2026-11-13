@@ -96,6 +96,20 @@ Clip Generator.
 | API | `GET/POST /api/collector`, `POST /api/collector/upload`, `POST /api/collector/{id}/download`, `POST /api/collector/{id}/queue`, `DELETE /api/collector/{id}` |
 | Processing | `POST /api/process` accepts `collector_id`; a downloaded file is hardlinked into the job, so the collector keeps its copy |
 
+## Settings — only what this build uses
+
+The Settings page keeps the Gemini key (optional: the keyless agent flow works
+without it) and the MCP how-to. The hosted product's sections were removed:
+
+- **Social Integration (Upload-Post)**: clips and thumbnails are downloaded and
+  uploaded by hand here. The per-clip `post` button and the Studio publish panel
+  are hidden unless a key from an older install is still in local storage.
+- **Video Translation (ElevenLabs)** and **AI Shorts / UGC (fal.ai)**: those
+  features are not part of this fork. The `dub voice` button is hidden unless a
+  legacy ElevenLabs key exists.
+- The AI Agent tab is not labelled BYOK any more: it runs through the keyless
+  MCP flow.
+
 ### What made native possible
 
 Five POSIX-only behaviours (seven call sites), all sealed in
