@@ -10,7 +10,7 @@ const LABELS = {
     running: 'processing',
     done: 'done',
     failed: 'failed',
-    cancelled: 'cancelled',
+    cancelled: 'stopped',
 };
 
 const TERMINAL_STATES = new Set(['done', 'failed', 'cancelled']);
@@ -64,12 +64,13 @@ const RowLogs = ({ row }) => (
 export default function BatchQueue({ batch, onCancel, onOpenGallery, onRetryFailed, onDismiss }) {
     const rows = batch?.rows || [];
     const running = !!batch?.running;
+    const stopping = !!batch?.stopping;
     const [open, setOpen] = useState({});
     const [now, setNow] = useState(Date.now());
 
     const done = rows.filter((r) => TERMINAL_STATES.has(r.state)).length;
-    const ok = rows.filter((r) => r.state === 'done').length;
-    const failed = rows.filter((r) => r.state === 'failed' || r.state === 'cancelled').length;
+    const stopped = rows.filter((r) => r.state === 'cancelled').length;
+    const failed = rows.filter((r) => r.state === 'failed').length;
     const pct = rows.length ? Math.round((done / rows.length) * 100) : 0;
     const runningIndex = rows.findIndex((r) => r.state === 'running' || r.state === 'submitting');
 
@@ -103,14 +104,24 @@ export default function BatchQueue({ batch, onCancel, onOpenGallery, onRetryFail
                             {running ? 'Processing your queue' : 'Queue finished'}
                         </h1>
                         <p className="text-sm text-muted mt-1">
-                            {done} of {rows.length} finished{ok !== done ? ` · ${done - ok} failed` : ''}.
+                            {done} of {rows.length} finished
+                            {failed ? ` · ${failed} failed` : ''}
+                            {stopped ? ` · ${stopped} stopped` : ''}.
                             {' '}Each video is processed one at a time.
                         </p>
                     </div>
                     <div className="flex items-center gap-2">
                         {running && (
-                            <button type="button" onClick={onCancel} className="btn-quiet text-xs py-1.5 px-2.5">
-                                <X size={13} /> stop
+                            <button
+                                type="button"
+                                onClick={onCancel}
+                                disabled={stopping}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                            >
+                                {stopping
+                                    ? <Loader2 size={13} className="animate-spin" />
+                                    : <X size={13} />}
+                                {stopping ? 'stopping…' : 'stop'}
                             </button>
                         )}
                         {!running && failedCount > 0 && (
@@ -139,7 +150,7 @@ export default function BatchQueue({ batch, onCancel, onOpenGallery, onRetryFail
                     <div className="flex items-center justify-between mt-2">
                         <p className="readout">{pct}%</p>
                         <p className="readout normal-case text-muted">
-                            {failed ? `${failed} failed` : 'queue healthy'}
+                            {failed ? `${failed} failed` : stopped ? `${stopped} stopped` : 'queue healthy'}
                         </p>
                     </div>
                 </div>

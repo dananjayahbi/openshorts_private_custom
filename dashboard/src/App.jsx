@@ -382,6 +382,10 @@ function App() {
   const [logsVisible, setLogsVisible] = useState(() => {
     try { return window.innerWidth >= 768; } catch { return true; }
   });
+  // Stop: the request is in flight, and the one-line outcome after it (partial
+  // assets removed / why the stop failed) shown above the generator.
+  const [stopping, setStopping] = useState(false);
+  const [stopNotice, setStopNotice] = useState('');
   const [processingMedia, setProcessingMedia] = useState(null);
   // Bulk mode: { rows: [{key,label,state,jobId,error}], running, startedAt }.
   // It renders instead of the single-job view and survives tab switches while
@@ -865,6 +869,17 @@ function App() {
             setStatus('complete');
             clearInterval(interval);
             refreshMe();
+          } else if (data.status === 'cancelled') {
+            // Stopped from this screen or by another tab: back to the
+            // generator, not an error. The server is removing its files.
+            clearInterval(interval);
+            setStatus('idle');
+            setResults(null);
+            setLogs([]);
+            setLogTimes([]);
+            setJobId(null);
+            setStopNotice('Stopped. Partial clips and the source download were removed.');
+            setQueueInfo(null);
           } else if (data.status === 'failed') {
             setStatus('error');
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
@@ -1233,6 +1248,7 @@ function App() {
     // Past every gate, so this request is really running: nothing left to resume.
     clearPendingJob();
     setStatus('processing');
+    setStopNotice('');
     setJobError('');
     setLogs(["Starting process..."]);
     setLogTimes([Date.now() / 1000]);
@@ -1405,6 +1421,13 @@ function App() {
           continue;
         }
         patch(i, { state: 'running', jobId: payload.job_id });
+        // Stop clicked while this video was being submitted: end it as soon
+        // as it exists instead of leaving it to run behind the queue.
+        if (batchCancelRef.current) {
+          try { await cancelServerJob(payload.job_id); } catch { /* row says so */ }
+          patch(i, { state: 'cancelled', finishedAt: Date.now() });
+          continue;
+        }
         const final = await waitForJob(payload.job_id, (state) => {
           lastStatus = String(state.status || '').toLowerCase();
           lastLogs = Array.isArray(state.logs) ? state.logs : lastLogs;
@@ -1545,7 +1568,45 @@ function App() {
     })),
   });
 
-  const stopBatch = () => { batchCancelRef.current = true; };
+  // Stop everything the user asked to stop. A queued job is taken off the
+  // server's heap; a running one has its process tree killed and its partial
+  // clips/source removed. The batch loop notices waitForJob returning
+  // 'cancelled' and marks the rest as cancelled without submitting them.
+  const cancelServerJob = async (id) => {
+    const res = await apiFetch(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    if (!res.ok) throw new Error(await errorText(res));
+    return res.json();
+  };
+
+  const stopBatch = async () => {
+    batchCancelRef.current = true;
+    const current = batch?.rows?.find((r) => r.state === 'running' || r.state === 'submitting');
+    if (current?.jobId) {
+      try {
+        await cancelServerJob(current.jobId);
+      } catch { /* the loop still stops; the row reports the failure */ }
+    }
+    setBatch((b) => (b ? { ...b, stopping: true } : b));
+  };
+
+  const stopSingleJob = async () => {
+    if (!jobId || stopping) return;
+    setStopping(true);
+    setStopNotice('');
+    try {
+      await cancelServerJob(jobId);
+      setStopNotice('Stopped. Partial clips and the source download were removed.');
+      setStatus('idle');
+      setResults(null);
+      setLogs([]);
+      setLogTimes([]);
+      setJobId(null);
+    } catch (e) {
+      setStopNotice(`Could not stop: ${String(e.message || e).slice(0, 240)}`);
+    } finally {
+      setStopping(false);
+    }
+  };
 
   // Resume the job the visitor started before signing in. Runs on the render
   // that first sees isSignedIn true — after a magic link or a Google round trip,
@@ -2046,6 +2107,20 @@ function App() {
           {activeTab === 'dashboard' && !batch && status === 'idle' && (
             <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
               <div className="min-h-full flex flex-col items-center justify-center px-4 py-5 sm:p-6">
+              {stopNotice && (
+                <div className="w-full max-w-2xl mb-4 rounded-card border border-rule bg-paper2 px-4 py-2.5 text-sm text-ink2 flex items-center gap-2">
+                  <Check size={14} className="text-ok shrink-0" />
+                  <span className="flex-1">{stopNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setStopNotice('')}
+                    className="text-muted hover:text-ink"
+                    aria-label="Dismiss"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              )}
               {/* On a phone the hero used to fill the fold on its own and push
                   the uploader — the whole point of the screen — below it. The
                   eyebrow, the display size and the gaps all shrink first. */}
@@ -2105,12 +2180,28 @@ function App() {
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
                     Live Analysis
                   </h2>
-                  <span className={status === 'processing' ? 'badge-brass' :
-                    status === 'complete' ? 'badge-ok' :
-                      'badge-danger'
-                    }>
-                    {status.toUpperCase()}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={status === 'processing' ? 'badge-brass' :
+                      status === 'complete' ? 'badge-ok' :
+                        'badge-danger'
+                      }>
+                      {status.toUpperCase()}
+                    </span>
+                    {status === 'processing' && jobId && (
+                      <button
+                        type="button"
+                        onClick={stopSingleJob}
+                        disabled={stopping}
+                        className="btn-quiet text-xs py-1.5 px-2.5"
+                        title="Stop this job and delete its partial files"
+                      >
+                        {stopping
+                          ? <Loader2 size={13} className="animate-spin" />
+                          : <X size={13} />}
+                        {stopping ? 'stopping…' : 'stop'}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Trimmed run: say it while it renders, not only once the

@@ -390,5 +390,16 @@ def mark_job(item_id, job_id):
     return _update(item_id, job_id=job_id, queued=False, last_job_at=time.time())
 
 
+def forget_job(job_id):
+    """Clear a cancelled job's id from the item that started it, so the shelf
+    does not link to a job whose files were removed."""
+    changed = 0
+    for item in list_items():
+        if item.get("job_id") == job_id:
+            _update(item["id"], job_id=None)
+            changed += 1
+    return changed
+
+
 def queued_items():
     return [i for i in list_items() if i["queued"]]

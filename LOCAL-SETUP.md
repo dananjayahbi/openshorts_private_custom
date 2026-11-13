@@ -188,7 +188,26 @@ instead of silently reverting to the default. Verified end to end: a job with
 produced an ASS with `Alignment 8`, `Impact 47`, `&H0088FF00` and the shadow
 colour, and the clip shipped with it.
 
-## Settings — only what this build uses
+## Stopping a job (single or queue)
+
+**stop** sits next to the status badge while a single job renders, and in the
+batch header while a queue runs. Both call `POST /api/jobs/{job_id}/cancel`:
+
+- a **queued** job is taken off the heap and never starts;
+- a **running** job has its process tree killed (`taskkill /T /F` on Windows),
+  so main.py *and* its ffmpeg/NVENC children stop writing;
+- the job becomes `cancelled` (not `failed`), no auto-retry or delivery runs,
+  and no webhook/email is sent;
+- once the process lets go of its files, the purge removes
+  `Storage/videos/<job_id>` (partial clips, metadata, source), the
+  `<job_id>_*` upload, the clip's gallery review key and the collector item's
+  `job_id`, so nothing of the stopped run reaches the gallery or the next scan.
+
+The batch **stop** cancels the video that is running and marks the rest
+`cancelled` without submitting them; **retry failed** can re-run those later.
+Cancelling a finished job is a no-op (`"cancelled": false`).
+
+## Settings - only what this build uses
 
 The Settings page keeps the AI provider chain, the editable prompts and the MCP
 how-to. There is no separate Gemini key card any more: a key belongs to a level

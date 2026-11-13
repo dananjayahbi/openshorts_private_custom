@@ -1912,6 +1912,10 @@ _stopping = False                    # SIGTERM received: report not-ready so the
                                      # proxy stops routing here before the
                                      # listening socket closes
 _running_jobs: set = set()           # job ids with a live subprocess here
+# The Popen of each running job, so "stop" can kill the process tree. main.py
+# spawns ffmpeg/NVENC children; killing only the Python process leaves those
+# writing into the job dir (Windows holds the files open, so cleanup fails).
+_job_procs: dict = {}
 
 
 # --- Remote CPU worker (remote_worker.py, worker.py) -------------------------
@@ -3021,6 +3025,12 @@ async def process_queue():
             _priority, _seq, job_id = await job_queue.get()
             _queue_changed()
 
+            # Stopped while it sat in the heap (a cancel that raced the worker).
+            if (jobs.get(job_id) or {}).get('cancel_requested'):
+                job_queue.task_done()
+                asyncio.create_task(_purge_cancelled_job(job_id))
+                continue
+
             if _draining:
                 # Leave it on disk for the next instance (manifest, no heartbeat).
                 print(f"⏸️ Draining — leaving {job_id} for the next instance.")
@@ -3043,6 +3053,13 @@ async def process_queue():
                 concurrency_semaphore.release()
                 job_queue.task_done()
                 print(f"⏸️ Draining — leaving {job_id} for the next instance.")
+                continue
+            # Stopped between being claimed and being admitted (a queued job
+            # whose slot wait overlapped the click): never start it.
+            if (jobs.get(job_id) or {}).get('cancel_requested'):
+                concurrency_semaphore.release()
+                job_queue.task_done()
+                asyncio.create_task(_purge_cancelled_job(job_id))
                 continue
             print(f"🔄 Acquired slot for job: {job_id}")
             if _priority >= _queue_mode.SLOW_PRIORITY and _queue_mode.brake_active():
@@ -3134,6 +3151,122 @@ def _release_slot(job_id):
     job_queue.task_done()
 
 
+# --- Cancel / stop ------------------------------------------------------------
+TERMINAL_JOB_STATES = {"completed", "complete", "failed", "cancelled", "error"}
+
+
+def _remove_queued_entry(job_id) -> bool:
+    """Take a still-queued job off the heap, or False when it is not there.
+
+    Each job is put on the queue once; an entry removed here will never be got
+    by the worker, so its task_done accounting is settled right away (the same
+    shape as the starved-job sweep).
+    """
+    heap = job_queue._queue
+    entries = [e for e in heap if e[2] == job_id]
+    if not entries:
+        return False
+    heap[:] = [e for e in heap if e[2] != job_id]
+    heapq.heapify(heap)
+    for _entry in entries:
+        try:
+            job_queue.task_done()
+        except ValueError:
+            break
+    _queue_changed()
+    return True
+
+
+def _kill_job_process(process) -> bool:
+    """Kill a job's process tree; True when a signal was actually sent.
+
+    Windows: taskkill /T ends main.py *and* its ffmpeg/NVENC children, which is
+    the difference between a stop and a stop that leaves half-written clips
+    locked. Elsewhere: the same on the process group, then the process.
+    """
+    if process is None:
+        return False
+    try:
+        if process.poll() is not None:
+            return False
+    except Exception:
+        pass
+    sent = False
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True, timeout=20)
+            sent = True
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            sent = True
+    except Exception:
+        pass
+    try:
+        process.kill()
+        sent = True
+    except Exception:
+        pass
+    return sent
+
+
+def _remove_tree(path, tries=12, delay=0.25) -> bool:
+    """Remove a file or directory, retrying while Windows releases handles."""
+    for attempt in range(tries):
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            elif os.path.exists(path) or os.path.islink(path):
+                os.remove(path)
+            return True
+        except OSError:
+            if attempt >= tries - 1:
+                return False
+            time.sleep(delay)
+    return False
+
+
+def _purge_job_assets(job_id) -> list:
+    """Delete everything a cancelled job wrote: its dir, its source upload and
+    its review state. Returns the paths that are gone (for the log/tests)."""
+    removed = []
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    if os.path.exists(job_dir) and _remove_tree(job_dir):
+        removed.append(job_dir)
+    for pattern in (f"{glob.escape(job_id)}_*", f"thumb_{glob.escape(job_id)}_*"):
+        for path in glob.glob(os.path.join(UPLOAD_DIR, pattern)):
+            if _remove_tree(path):
+                removed.append(path)
+    try:
+        clip_state.forget_job(job_id)
+    except Exception:
+        pass
+    try:
+        collector.forget_job(job_id)
+    except Exception:
+        pass
+    return removed
+
+
+async def _purge_cancelled_job(job_id):
+    """Wait for the killed process to let go, then remove its assets."""
+    for _ in range(120):  # at most a minute: taskkill normally returns at once
+        if job_id not in _job_procs and job_id not in _running_jobs:
+            break
+        await asyncio.sleep(0.5)
+    removed = await asyncio.to_thread(_purge_job_assets, job_id)
+    _clear_resume_manifest(job_id)
+    job = jobs.get(job_id)
+    if job is not None:
+        if removed:
+            job['logs'].append(
+                f"🧹 Removed {len(removed)} partial asset(s) from the cancelled job.")
+        else:
+            job['logs'].append("🧹 Nothing was left on disk for the cancelled job.")
+        job['assets_purged'] = True
+
+
 async def run_job_wrapper(job_id):
     """Wrapper to run job and release semaphore"""
     # Keep the record itself: run_job writes its status into this same dict,
@@ -3163,6 +3296,13 @@ async def run_job_wrapper(job_id):
             print(f"♻️ Server stopping: leaving {job_id} for the next instance.")
             if interrupted:
                 raise asyncio.CancelledError()
+            return
+        # A user stop: no retry, no delivery, no webhook. The assets are being
+        # removed by _purge_cancelled_job, which waits for this to release.
+        if job is not None and job.get('status') == 'cancelled':
+            _clear_resume_manifest(job_id)
+            _release_slot(job_id)
+            print(f"🛑 Released slot for cancelled job: {job_id}")
             return
         if _should_auto_retry(job):
             _schedule_auto_retry(job_id, job)
@@ -4603,6 +4743,12 @@ def _refresh_partial_result(job_id, output_dir):
 def _finish_job(job_id, returncode, output_dir):
     """main.py exited (here or on the remote worker): the job's final status
     and result, from the exit code and what is on disk."""
+    # A cancel wins over the exit code: taskkill gives the child a non-zero
+    # code, and the job must not turn into "failed" after the user stopped it.
+    if (jobs.get(job_id) or {}).get('cancel_requested'):
+        jobs[job_id]['status'] = 'cancelled'
+        jobs[job_id]['logs'].append("🛑 Cancelled — partial output was not kept.")
+        return
     if returncode == 0:
         jobs[job_id]['status'] = 'completed'
         jobs[job_id]['logs'].append("Process finished successfully.")
@@ -4671,36 +4817,46 @@ async def _run_main(job_id, cmd, env, tick=None):
         # Windows has no preexec_fn; the priority class is the equivalent.
         **platform_compat.child_priority_kwargs(_job_nice()),
     )
+    # Registered so POST /api/jobs/{id}/cancel can end the tree (main.py plus
+    # its ffmpeg children), not just the pipe this coroutine owns.
+    _job_procs[job_id] = process
     # We need to capture logs in a thread because Popen isn't async
     t_log = threading.Thread(target=enqueue_output, args=(process.stdout, job_id))
     t_log.daemon = True
     t_log.start()
 
-    last_heartbeat = time.time()
-    while process.poll() is None:
-        try:
-            await asyncio.sleep(2)
-        except asyncio.CancelledError:
+    try:
+        last_heartbeat = time.time()
+        while process.poll() is None:
             try:
-                process.kill()
-            except Exception:
-                pass
-            raise
-        if time.time() - last_heartbeat >= HEARTBEAT_EVERY:
-            _touch_manifest(job_id)
-            last_heartbeat = time.time()
-        if tick is not None:
-            tick()
-    # The exit code can be read before the reader thread saw the last lines
-    # (SOURCE_READY is printed right before the exit).
-    await asyncio.to_thread(t_log.join, 5)
-    return process.returncode
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                raise
+            if time.time() - last_heartbeat >= HEARTBEAT_EVERY:
+                _touch_manifest(job_id)
+                last_heartbeat = time.time()
+            if tick is not None:
+                tick()
+        # The exit code can be read before the reader thread saw the last lines
+        # (SOURCE_READY is printed right before the exit).
+        await asyncio.to_thread(t_log.join, 5)
+        return process.returncode
+    finally:
+        _job_procs.pop(job_id, None)
 
 
 async def run_job(job_id, job_data):
     """Executes the subprocess for a specific job."""
     if job_id in _remote_jobs:
         return await _run_job_remote(job_id, job_data)
+    # A stop that landed after admission: the job must not start at all.
+    if job_data.get('cancel_requested') or (jobs.get(job_id) or {}).get('cancel_requested'):
+        jobs[job_id]['status'] = 'cancelled'
+        return
 
     cmd = job_data['cmd']
     env = _job_encode_env(job_data['env'])
@@ -4852,6 +5008,9 @@ async def _run_job_remote(job_id, job_data):
         returncode = None
         while returncode is None:
             await asyncio.sleep(2)
+            if (jobs.get(job_id) or {}).get('cancel_requested'):
+                returncode = -15
+                break
             if time.time() - last_heartbeat >= HEARTBEAT_EVERY:
                 _touch_manifest(job_id)
                 last_heartbeat = time.time()
@@ -6464,6 +6623,43 @@ def _presented_status(job_id, job):
         # finished for the user until the delivery says so.
         return 'processing'
     return job['status']
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    """Stop one job — queued or running — and delete what it wrote.
+
+    The single-video screen and the batch queue both use this. A queued job is
+    taken off the heap; a running one has its process tree killed; the job
+    subprocess's own models die with it. Partial clips, the source upload and
+    the gallery review state are removed once the process has exited.
+    """
+    job = jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, job)
+    status = str(job.get('status') or '').lower()
+    if status in TERMINAL_JOB_STATES:
+        return {"ok": True, "status": status, "cancelled": False,
+                "detail": "This job already finished."}
+
+    job['cancel_requested'] = True
+    job['status'] = 'cancelled'
+    job['logs'].append("🛑 Stopped by the user — cleaning up partial files.")
+    was_queued = status == 'queued'
+    queued = _remove_queued_entry(job_id)
+    killed = _kill_job_process(_job_procs.get(job_id))
+    if job_id in _remote_jobs:
+        try:
+            remote_worker.clear(job.get('output_dir'), purge=True)
+        except Exception:
+            pass
+    # The job may have been claimed by the worker but not started yet
+    # (``_admitting``): the worker checks cancel_requested before running it.
+    asyncio.create_task(_purge_cancelled_job(job_id))
+    print(f"🛑 [cancel] job={job_id} queued={queued} killed={killed}")
+    return {"ok": True, "status": "cancelled", "cancelled": True,
+            "queued": was_queued or queued, "killed": killed}
 
 
 @app.get("/api/status/{job_id}")

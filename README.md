@@ -15,7 +15,7 @@ Docker.
 | Page | What it does |
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip, **unload vram** |
-| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or bulk queue |
+| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or bulk queue; stop a run and remove its partial files |
 | Clip Gallery | Every rendered clip; mark used, archive, restore, download |
 | Collector | Shelf of links and files; download later, queue, process |
 | Playground | Try caption looks and output shapes on a real clip, save the result as a profile |

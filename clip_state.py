@@ -128,6 +128,17 @@ def archive_used(keys=None):
     return archived
 
 
+def forget_job(job_id):
+    """Drop every entry of a job whose directory was deleted (cancel)."""
+    prefix = f"{job_id}:"
+    with _lock:
+        data = _read()
+        kept = {k: v for k, v in data.items() if not k.startswith(prefix)}
+        if len(kept) != len(data):
+            _write(kept)
+        return len(data) - len(kept)
+
+
 def prune(known_keys):
     """Drop entries whose job/clip no longer exists (called on gallery scans)."""
     known = {_key(j, i) for j, i in known_keys}
