@@ -1,64 +1,37 @@
-import React, { useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Plug, Copy, Check } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 
-// "Connect an agent": the one place that tells a person how to drive
-// OpenShorts from Claude, ChatGPT, Cursor or n8n. Cloud accounts connect by
-// URL (claude.ai and ChatGPT run the OAuth flow themselves; CLI clients take
-// an API key); a self-hosted install has no auth, so every snippet is the
-// local URL and nothing else.
+// "Connect an agent": tells a person how to drive Clip Studio from Claude,
+// ChatGPT, Cursor or n8n. This fork has no hosted edition, so every snippet is
+// this machine's own MCP URL and none needs a key.
+//
+// The dashboard proxies /api and /videos but not /mcp, and it runs on its own
+// port, so the MCP client must be told the API origin. The server reports it
+// (/api/config publicApiUrl, from PUBLIC_API_URL); until that arrives, fall
+// back to the page's hostname.
 
-const CLOUD_MCP_URL = 'https://mcp.openshorts.app/mcp';
-
-// The self-hosted dashboard proxies /api and /videos to the backend but not
-// /mcp (neither the Vite dev proxy nor nginx.conf), so an MCP client must
-// talk to the API container itself: VITE_API_URL when it is set, otherwise
-// the backend's default port on the same host.
-function localMcpUrl() {
-  const u = getApiUrl('/mcp');
-  if (u.startsWith('http')) return u;
-  try { return `${window.location.protocol}//${window.location.hostname}:8000/mcp`; } catch { return 'http://localhost:8000/mcp'; }
+function withMcp(url) {
+  const base = String(url || '').replace(/\/+$/, '');
+  return base ? `${base}/mcp` : '';
 }
 
-function buildClients({ cloud, url }) {
-  const key = cloud ? 'osk_YOUR_KEY' : null;
-  const header = key ? ` \\\n  --header "Authorization: Bearer ${key}"` : '';
-  const desktopArgs = key
-    ? `["-y", "mcp-remote", "${url}", "--header", "Authorization: Bearer ${key}"]`
-    : `["-y", "mcp-remote", "${url}"]`;
-  const cursorHeaders = key ? `,\n      "headers": { "Authorization": "Bearer ${key}" }` : '';
+function buildClients(url) {
   return [
-    cloud && {
-      id: 'claude-ai', label: 'Claude (claude.ai)', kind: 'steps',
-      steps: [
-        'Open claude.ai → Settings → Connectors → Add custom connector.',
-        `Paste this URL and save: ${url}`,
-        'Click Connect: you will land on OpenShorts to approve the access, then the 8 tools appear in every chat.',
-      ],
-      snippet: url,
-    },
-    cloud && {
-      id: 'chatgpt', label: 'ChatGPT', kind: 'steps',
-      steps: [
-        'Open ChatGPT → Settings → Connectors → Create (developer mode).',
-        `Name it OpenShorts, paste this MCP server URL, choose OAuth: ${url}`,
-        'Approve the access on OpenShorts when asked. Done: ask ChatGPT to clip a video.',
-      ],
-      snippet: url,
-    },
     {
       id: 'claude-code', label: 'Claude Code', kind: 'code', lang: 'bash',
-      snippet: `claude mcp add --transport http openshorts ${url}${header}`,
-      note: cloud ? 'Create a key below and paste it in place of osk_YOUR_KEY.' : 'No key needed on a self-hosted install.',
+      snippet: `claude mcp add --transport http clipstudio ${url}`,
+      note: 'No key needed on a local install.',
     },
     {
       id: 'claude-desktop', label: 'Claude Desktop', kind: 'code', lang: 'json',
-      snippet: `{\n  "mcpServers": {\n    "openshorts": {\n      "command": "npx",\n      "args": ${desktopArgs}\n    }\n  }\n}`,
+      snippet: `{\n  "mcpServers": {\n    "clipstudio": {\n      "command": "npx",\n      "args": ["-y", "mcp-remote", "${url}"]\n    }\n  }\n}`,
       note: 'Settings → Developer → Edit config (claude_desktop_config.json), then restart Claude.',
     },
     {
       id: 'cursor', label: 'Cursor', kind: 'code', lang: 'json',
-      snippet: `{\n  "mcpServers": {\n    "openshorts": {\n      "url": "${url}"${cursorHeaders}\n    }\n  }\n}`,
+      snippet: `{\n  "mcpServers": {\n    "clipstudio": {\n      "url": "${url}"\n    }\n  }\n}`,
       note: 'Settings → MCP → Add new global MCP server (.cursor/mcp.json).',
     },
     {
@@ -66,23 +39,43 @@ function buildClients({ cloud, url }) {
       steps: [
         'Add an "MCP Client Tool" node to your AI Agent.',
         `Endpoint: ${url}  ·  Transport: HTTP Streamable.`,
-        cloud ? 'Authentication: Bearer, with a key from below.' : 'Authentication: none.',
+        'Authentication: none.',
       ],
       snippet: url,
     },
     {
       id: 'curl', label: 'curl', kind: 'code', lang: 'bash',
-      snippet: `curl -X POST ${url} \\\n  -H "Content-Type: application/json"${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''} \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+      snippet: `curl -X POST ${url} \\\n  -H "Content-Type: application/json" \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
       note: 'Plain JSON-RPC over HTTP: the same endpoint every client above talks to.',
     },
-  ].filter(Boolean);
+  ];
 }
 
-export default function McpConnectCard({ cloud = true, compact = false }) {
-  const url = cloud ? CLOUD_MCP_URL : localMcpUrl();
-  const clients = buildClients({ cloud, url });
-  const [active, setActive] = useState(clients[0].id);
+export default function McpConnectCard({ compact = false }) {
+  const [origin, setOrigin] = useState('');
+  const [active, setActive] = useState('claude-code');
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (cancelled) return;
+        const publicUrl = cfg && cfg.publicApiUrl;
+        if (publicUrl) return setOrigin(publicUrl);
+        // Same-origin /mcp when the backend serves the page, else the API's
+        // default host on this machine. VITE_API_URL covers a split deploy.
+        const relative = getApiUrl('/mcp');
+        if (relative.startsWith('http')) return setOrigin(relative.replace(/\/mcp$/, ''));
+        return setOrigin(`${window.location.protocol}//${window.location.hostname}:8000`);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const url = withMcp(origin) || 'http://localhost:8000/mcp';
+  const clients = buildClients(url);
   const current = clients.find((c) => c.id === active) || clients[0];
 
   const copy = useCallback(() => {
@@ -98,11 +91,10 @@ export default function McpConnectCard({ cloud = true, compact = false }) {
         <Plug size={16} className="text-brass" /> Connect an agent
       </h3>
       <p className="text-muted text-sm mb-4">
-        Let Claude, ChatGPT, Cursor or n8n clip and publish for you through the built-in MCP server:
-        8 tools (process a video or upload one, check a job, list clips, add subtitles, recut, publish, quota).
-        {cloud
-          ? ' claude.ai and ChatGPT connect with one URL and a sign-in; CLI clients use an API key.'
-          : ' This install runs without accounts, so no key is needed.'}
+        Let Claude, ChatGPT, Cursor or n8n clip and publish for you through the built-in MCP
+        server: 13 tools (process a video or upload one, check a job, read a transcript, render a
+        plan, list clips, add subtitles, recut, publish, overview). This install runs without
+        accounts, so no key is needed.
       </p>
 
       <div className="flex flex-wrap gap-1.5 mb-4" role="tablist" aria-label="client">

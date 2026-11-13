@@ -3,6 +3,7 @@ import llm_backend
 import platform_compat
 import storage
 import collector
+import clip_state
 import re
 import sys
 import uuid
@@ -289,7 +290,7 @@ def gemini_missing_error():
     """
     if BILLING_ENABLED:
         return payment_required(
-            "no_plan", "This action needs an active OpenShorts plan (or the user's own API key).")
+            "no_plan", "This action needs an active plan (or the user's own API key).")
     return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
 
 
@@ -648,7 +649,7 @@ async def _reserve_after_job_limit(request, user, url, input_path, job_id, max_m
     if balance["remaining"] < 1:
         _maybe_send_quota_email(user)
         raise payment_required(
-            "quota_exceeded", "The user is out of OpenShorts processing minutes for this period.",
+            "quota_exceeded", "The user is out of processing minutes for this period.",
             minutes_required=1, minutes_remaining=balance["remaining"], partial_minutes=0)
 
     # Free queue lane, then the brake: before the probe, the reservation and
@@ -3728,9 +3729,9 @@ async def _webhook_clip_entries(job_id, job):
 
 
 async def _deliver_webhook(url, body: bytes, secret):
-    headers = {"Content-Type": "application/json", "User-Agent": "OpenShorts-Webhook/1.0"}
+    headers = {"Content-Type": "application/json", "User-Agent": "ClipStudio-Webhook/1.0"}
     if secret:
-        headers["X-OpenShorts-Signature"] = _sign_webhook(body, secret)
+        headers["X-ClipStudio-Signature"] = _sign_webhook(body, secret)
     from security_utils import assert_public_url, UnsafeURLError
     loop = asyncio.get_event_loop()
     for attempt, delay in enumerate(WEBHOOK_RETRY_DELAYS, 1):
@@ -5078,6 +5079,10 @@ async def get_config():
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        # Where this API is reachable from a user's machine. The dashboard is
+        # served on another port and does not proxy /mcp, so the agent snippets
+        # need the absolute origin; empty means "derive it in the browser".
+        "publicApiUrl": os.environ.get("PUBLIC_API_URL", "").rstrip("/"),
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
@@ -5163,10 +5168,16 @@ async def get_overview():
     disk = {}
     try:
         usage = shutil.disk_usage(storage.STORAGE_DIR)
+        # "used" is this app's own footprint, "total" is the room it has left:
+        # the meter answers "how much of the space still available does the
+        # library occupy", not "how full is a 310 GB drive" (which read as
+        # almost empty while only 22 GB was free). capacity/free keep the raw
+        # drive numbers for the caption.
         disk = {
             "usedGb": round(_dir_size(storage.STORAGE_DIR) / 1024 ** 3, 2),
             "freeGb": round(usage.free / 1024 ** 3, 1),
-            "totalGb": round(usage.total / 1024 ** 3, 1),
+            "totalGb": round(usage.free / 1024 ** 3, 1),
+            "capacityGb": round(usage.total / 1024 ** 3, 1),
             "path": os.path.abspath(storage.STORAGE_DIR),
         }
     except OSError:
@@ -5425,9 +5436,13 @@ async def delete_upload(upload_id: str, request: Request):
 
 # --- Collector: the shelf of videos to clip later (collector.py) -------------
 def _collector_thumb(video_path, thumb_path):
-    """A poster frame for a local upload; silently no-ops on failure."""
+    """A poster frame for a local upload; silently no-ops on failure.
+
+    Skip 30 s into the video so the frame lands in the content, not on an
+    intro/title card. A video shorter than that uses its midpoint.
+    """
     duration = _media_duration_seconds(video_path) or 0
-    at = min(2.0, max(0.1, duration / 2)) if duration else 0.5
+    at = 30.0 if duration > 30 else max(0.1, duration / 2) if duration else 0.5
     try:
         subprocess.run(
             ["ffmpeg", "-v", "error", "-ss", f"{at:.3f}", "-i", video_path,
@@ -6412,7 +6427,7 @@ async def download_all_clips(job_id: str, request: Request):
     return FileResponse(
         zip_path,
         media_type="application/zip",
-        filename=f"openshorts_clips_{job_id[:8]}.zip",
+        filename=f"clips_{job_id[:8]}.zip",
         background=BackgroundTask(remove_zip),
     )
 
@@ -8705,7 +8720,7 @@ async def _social_analytics_auth(request: Request, byok_profile: Optional[str]):
         if BILLING_ENABLED:
             # Signed-in free user (or no auth at all): social posting is
             # paid-only in cloud, so there are no posts to measure either.
-            raise payment_required("no_plan", "Social analytics needs an active OpenShorts plan.")
+            raise payment_required("no_plan", "Social analytics needs an active plan.")
         raise HTTPException(status_code=400, detail="Missing X-Upload-Post-Key header")
     if forced_profile:
         user = await _user_from_request(request)
@@ -8776,7 +8791,7 @@ async def social_total_impressions(
     breakdown: Optional[bool] = None,
     user: Optional[str] = None,
 ):
-    """Views of the posts published through OpenShorts in a window.
+    """Views of the posts published in a window.
 
     Computed by aggregating the profile-scoped post cache instead of proxying
     Upload-Post's /total-impressions: that endpoint echoes the requested
@@ -8891,7 +8906,7 @@ async def _scheduled_posts_for(api_key: str, profile: str) -> list:
 
     Upload-Post's GET /uploadposts/schedule takes no profile filter and returns
     everything the *account* has pending — with the managed key that is every
-    OpenShorts user's queue, so the filter below is what keeps one tenant from
+    the user's queue, so the filter below is what keeps one tenant from
     seeing (or cancelling) another's. Same class of bug as the impressions
     endpoint; do not "simplify" it away.
     """
@@ -8968,7 +8983,7 @@ async def _probe_thumbnail_url(request, url, user):
     if balance["remaining"] < 1:
         _maybe_send_quota_email(user)
         raise payment_required(
-            "quota_exceeded", "The user is out of OpenShorts processing minutes for this period.",
+            "quota_exceeded", "The user is out of processing minutes for this period.",
             minutes_required=1, minutes_remaining=balance["remaining"])
     _check_probe_rate(user.id)
     paid_allowed = not await _paid_proxy_budget_exceeded()
@@ -9319,7 +9334,7 @@ async def _thumbnail_text_gate(request, session):
             _maybe_send_quota_email(user)
             raise payment_required(
                 "quota_exceeded",
-                "The user is out of OpenShorts minutes; analyze a video to get title suggestions.",
+                "The user is out of minutes; analyze a video to get title suggestions.",
                 minutes_required=1, minutes_remaining=balance["remaining"])
     times.append(now)
 
@@ -9895,15 +9910,25 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
 
 
 @app.get("/api/gallery/clips")
-async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0):
+async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0,
+                            view: str = "active", usage: str = "any"):
     """Every clip this instance has rendered, newest job first.
 
     Self-host replacement for the R2-backed gallery: it reads the job dirs on
     disk (the same files /videos serves) instead of listing an S3 bucket, so
     the gallery works with no cloud credentials. Jobs are ordered by directory
     mtime; clips keep the order the job's metadata lists them in.
+
+    ``view``  active (default: not archived) | archived | all
+    ``usage`` any | used | unused — the per-clip "I already posted this" mark.
+
+    Filtering happens before the page is cut, so ``total`` and ``has_more``
+    describe the filtered list the caller is paging through, not the whole
+    library. ``counts`` always covers everything, for the tab badges.
     """
     limit = min(max(1, limit), 100)
+    view = view if view in ("active", "archived", "all") else "active"
+    usage = usage if usage in ("used", "unused") else "any"
     owner = await _owner_id(request) if BILLING_ENABLED else None
     thumbs = os.path.basename(THUMBNAILS_DIR)
 
@@ -9932,6 +9957,10 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0):
 
     clips = []
     total = 0
+    counts = {"unused": 0, "used": 0, "archived": 0}
+    known = []
+    states = await asyncio.to_thread(clip_state.snapshot)
+    empty = {"used": False, "archived": False, "used_at": None, "archived_at": None}
     for mtime, job_id, path in job_dirs:
         json_files = glob.glob(os.path.join(path, "*_metadata.json"))
         if not json_files:
@@ -9946,17 +9975,81 @@ async def get_gallery_clips(request: Request, limit: int = 24, offset: int = 0):
             entry = _gallery_entry(job_id, path, index, clip, created)
             if entry is None:
                 continue
+            known.append((job_id, index))
+            state = states.get(f"{job_id}:{index}", empty)
+            entry.update(state)
+            if state["archived"]:
+                counts["archived"] += 1
+                in_view = view in ("archived", "all")
+            else:
+                counts["used" if state["used"] else "unused"] += 1
+                in_view = view in ("active", "all")
+            if not in_view:
+                continue
+            if usage == "used" and not state["used"]:
+                continue
+            if usage == "unused" and state["used"]:
+                continue
             total += 1
             if total > offset and len(clips) < limit:
                 clips.append(entry)
 
+    # Drop state for clips whose job directory was deleted (retention sweep).
+    try:
+        await asyncio.to_thread(clip_state.prune, known)
+    except OSError:
+        pass
+
     return {
         "clips": clips,
         "total": total,
+        "counts": counts,
         "limit": limit,
         "offset": offset,
         "has_more": total > offset + len(clips),
     }
+
+
+def _job_clip_count(job_id):
+    """How many clips a job rendered, or 0 when the job is gone."""
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", str(job_id or "")):
+        return 0
+    path = os.path.join(OUTPUT_DIR, str(job_id))
+    json_files = glob.glob(os.path.join(path, "*_metadata.json"))
+    if not json_files:
+        return 0
+    try:
+        with open(json_files[0]) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(data.get("shorts") or [])
+
+
+@app.patch("/api/gallery/clip/{job_id}/{index}")
+async def set_gallery_clip_state(job_id: str, index: int, request: Request):
+    """Mark one clip used / unused, or archive / restore it."""
+    if index < 0:
+        raise HTTPException(status_code=400, detail="Invalid clip index")
+    if index >= _job_clip_count(job_id):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    if "used" not in body and "archived" not in body:
+        raise HTTPException(status_code=400, detail="Nothing to change")
+    return await asyncio.to_thread(
+        clip_state.set_flags, job_id, index,
+        used=body.get("used"), archived=body.get("archived"))
+
+
+@app.post("/api/gallery/archive-used")
+async def archive_used_clips():
+    """Archive every clip marked used, in one go (restore stays per clip)."""
+    archived = await asyncio.to_thread(clip_state.archive_used)
+    return {"archived": archived}
 
 
 
@@ -10247,14 +10340,12 @@ async def saasshorts_post_to_socials(req: SaaSPostRequest, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# The gallery and the per-video pages are rendered by this API service, but the
-# app they advertise lives on www. A relative href on `api.` host resolves
-# against `api.`, where `/` is not the app (it is a 404), so every link that
-# crosses hosts is written absolute. `www.openshorts.app/gallery` and
-# `/video/...` 301 to the api host (dashboard/nginx.conf), so the api host is
-# the final domain for those two and the app host is final for everything else.
-APP_HOST = "https://www.openshorts.app"
-GALLERY_HOST = "https://api.openshorts.app"
+# These pages are served by this API process. On a hosted deployment the
+# dashboard lives on another origin, so the links that cross hosts are written
+# absolute. A local install sets neither env var, and the relative links keep
+# working on whatever host serves the API.
+APP_HOST = os.environ.get("PUBLIC_APP_URL", "").rstrip("/")
+GALLERY_HOST = os.environ.get("PUBLIC_API_URL", "").rstrip("/")
 
 
 def _json_ld(payload: dict) -> str:
@@ -10354,11 +10445,11 @@ async def gallery_html_page():
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI UGC Video Gallery | OpenShorts</title>
+<title>AI UGC Video Gallery | Clip Studio</title>
 <meta name="description" content="Browse {len(videos)} AI-generated UGC marketing videos. Create viral TikTok and Instagram Reels for your SaaS product.">
 <meta name="robots" content="{UGC_ROBOTS}">
 <link rel="canonical" href="{GALLERY_HOST}/gallery">
-<meta property="og:title" content="AI UGC Video Gallery | OpenShorts">
+<meta property="og:title" content="AI UGC Video Gallery | Clip Studio">
 <meta property="og:type" content="website">
 <meta property="og:description" content="Browse AI-generated UGC marketing videos for SaaS products.">
 <script type="application/ld+json">{ld_json}</script>
@@ -10373,7 +10464,7 @@ h1{{font-size:28px;font-weight:700;padding:40px 20px 0;text-align:center}}
 </style>
 </head>
 <body>
-<nav><strong style="font-size:18px">OpenShorts</strong><a href="{APP_HOST}/" class="cta">Create Your Video</a></nav>
+<nav><strong style="font-size:18px">Clip Studio</strong><a href="{APP_HOST}/" class="cta">Create Your Video</a></nav>
 <h1>AI-Generated UGC Videos</h1>
 <p class="subtitle">{len(videos)} videos generated · Low Cost & Premium modes</p>
 <div class="grid">{cards_html}</div>
@@ -10444,7 +10535,7 @@ async def video_html_page(video_id: str):
 <html lang="{language}">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} - AI UGC Video | OpenShorts</title>
+<title>{title} - AI UGC Video | Clip Studio</title>
 <meta name="description" content="{caption} {hashtags}">
 <meta name="robots" content="{UGC_ROBOTS}">
 <link rel="canonical" href="{GALLERY_HOST}/video/{video_id}">
@@ -10478,7 +10569,7 @@ h1{{font-size:22px;font-weight:700;margin-bottom:8px}}
 </style>
 </head>
 <body>
-<nav><strong>OpenShorts</strong><a href="{GALLERY_HOST}/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
+<nav><strong>Clip Studio</strong><a href="{GALLERY_HOST}/gallery">Gallery</a><span style="color:#3f3f46">›</span><span style="color:#e4e4e7;font-size:14px">{title}</span></nav>
 <div class="container">
 <div><video src="{video_url}" poster="{actor_url}" controls autoplay playsinline style="aspect-ratio:9/16;object-fit:cover"></video></div>
 <div>

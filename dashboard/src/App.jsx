@@ -17,7 +17,6 @@ import UsageMeter from './components/UsageMeter';
 import TopUpModal from './components/TopUpModal';
 import WatermarkModal, { watermarkNoticeDismissed } from './components/WatermarkModal';
 import { getApiUrl } from './config';
-import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import ClipTutorial from './components/ClipTutorial';
 import OnboardingSurvey from './components/OnboardingSurvey';
@@ -387,6 +386,9 @@ function App() {
   // It renders instead of the single-job view and survives tab switches while
   // this browser tab is open.
   const [batch, setBatch] = useState(null);
+  // {item, at}: a Collector card's "Process" hands its video to the Clip
+  // Generator instead of submitting a job behind the user's back.
+  const [collectorPrefill, setCollectorPrefill] = useState(null);
   const batchCancelRef = useRef(false);
   const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, ai-agent, thumbnails, settings
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
@@ -683,7 +685,7 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `openshorts_clips_${(jobId || '').slice(0, 8)}.zip`;
+      a.download = `clips_${(jobId || '').slice(0, 8)}.zip`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1405,11 +1407,17 @@ function App() {
     layout: 'auto',
   };
 
-  const processCollectorItem = (item) => handleProcess({
-    ...BATCH_DEFAULTS,
-    type: 'collector',
-    payload: item.id,
-  });
+  // Collector → Clip Generator. "Process" on a collector card now opens the
+  // Clip Generator with that video pre-selected, so the user sees the output
+  // format/options and presses the real submit button. It does not start a job
+  // by itself any more.
+  const processCollectorItem = (item) => {
+    if (!item) return;
+    setBatch(null);
+    setStatus('idle');
+    setCollectorPrefill({ item, at: Date.now() });
+    goToTab('dashboard');
+  };
 
   const processCollectorQueue = (items) => handleProcessBatch({
     ...BATCH_DEFAULTS,
@@ -1501,44 +1509,8 @@ function App() {
   };
   const tabLocked = (id) => tutorialLock && id !== 'dashboard';
 
-  // Shared footer links (landing, repo, pricing, contact) — same list in the
-  // desktop rail and the mobile drawer, so they can never drift apart.
-  const NavFooterLinks = ({ collapsed = false }) => (
-    <>
-      <a
-        href="#landing"
-        className="flex items-center gap-2 px-3 py-2 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-      >
-        <Globe size={14} className="shrink-0" />
-        <span className={collapsed ? 'hidden lg:block truncate' : 'truncate'}>landing page</span>
-      </a>
-      <a
-        href="https://github.com/mutonby/openshorts"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex items-center gap-2 px-3 py-2 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-      >
-        <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-        <span className={collapsed ? 'hidden lg:block truncate' : 'truncate'}>open source</span>
-      </a>
-      {billingEnabled && (
-        <a
-          href="#/pricing"
-          className="flex items-center gap-2 px-3 py-2 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-        >
-          <Sparkles size={14} className="shrink-0" />
-          <span className={collapsed ? 'hidden lg:block truncate' : 'truncate'}>plans &amp; pricing</span>
-        </a>
-      )}
-      <a
-        href="mailto:info@openshorts.app"
-        className="flex items-center gap-2 px-3 py-2 text-xs lowercase text-muted hover:text-ink2 transition-colors"
-      >
-        <Mail size={14} className="shrink-0" />
-        <span className={collapsed ? 'hidden lg:block truncate' : 'truncate'}>info@openshorts.app</span>
-      </a>
-    </>
-  );
+  // No upstream links here: this is a private local build. The old drawer
+  // footer (landing page, source repo, hosted pricing, contact address) is gone.
 
   // Top rail: brand, the six sections, and the account/settings corner. The
   // old 80/256px side rail is gone — on a laptop it cost a third of the width
@@ -1551,12 +1523,12 @@ function App() {
         href="#app"
         onClick={() => goToTab('home')}
         className="flex items-center gap-2.5 pr-2 shrink-0"
-        title="openshorts home"
+        title="Clip Studio home"
       >
         <div className="w-7 h-7 bg-paper3 rounded-input flex items-center justify-center overflow-hidden border border-rule">
-          <img src="/logo-openshorts.png" alt="" className="w-full h-full object-cover" />
+          <img src="/favicon.svg" alt="" className="w-full h-full object-cover" />
         </div>
-        <span className="font-display lowercase text-lg text-ink hidden xs:block sm:block">openshorts</span>
+        <span className="font-display lowercase text-lg text-ink hidden xs:block sm:block">clip studio</span>
       </a>
 
       <nav className="hidden md:flex items-center gap-0.5 min-w-0">
@@ -1633,9 +1605,9 @@ function App() {
         <div className="flex items-center justify-between px-5 h-14 border-b border-rule shrink-0">
           <a href="#app" className="flex items-center gap-2.5" onClick={() => goToTab('dashboard')}>
             <div className="w-7 h-7 bg-paper3 rounded-input overflow-hidden border border-rule shrink-0">
-              <img src="/logo-openshorts.png" alt="" className="w-full h-full object-cover" />
+              <img src="/favicon.svg" alt="" className="w-full h-full object-cover" />
             </div>
-            <span className="font-display lowercase text-lg text-ink">openshorts</span>
+            <span className="font-display lowercase text-lg text-ink">clip studio</span>
           </a>
           <button
             onClick={() => setNavOpen(false)}
@@ -1672,10 +1644,6 @@ function App() {
             );
           })}
         </nav>
-
-        <div className="px-3 py-3 border-t border-rule space-y-0.5 safe-bottom shrink-0">
-          <NavFooterLinks />
-        </div>
       </div>
     </div>
   );
@@ -1737,11 +1705,9 @@ function App() {
             <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 text-sm text-ink2 min-w-0 flex-1">
               <KeyRound size={16} className="shrink-0 text-warn mt-0.5 sm:mt-0" />
               <div className="min-w-0">
-                <span className="font-medium text-ink">Required API keys missing.</span>{' '}
+                <span className="font-medium text-ink">Gemini API key missing.</span>{' '}
                 <span className="text-muted">
-                  Set your Gemini API key to use OpenShorts. Social publishing
-                  (Upload-Post) is optional — you can download clips and upload
-                  them yourself.
+                  Set a key to use Clip Studio's AI picker. Everything else runs locally.
                 </span>
               </div>
             </div>
@@ -1873,44 +1839,37 @@ function App() {
             </div>
           )}
 
-          {/* View: AI Agent */}
+          {/* View: AI Agent — the real control surface of this install: the
+              MCP server. The upstream page advertised a separate GitHub
+              "skill" and an autopilot this fork does not have. */}
           {activeTab === 'ai-agent' && (
             <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-3 sm:p-6 animate-fade">
-              <div className="w-full space-y-8">
+              <div className="w-full space-y-6">
 
-                {/* Header */}
                 <div className="space-y-3">
                   <p className="eyebrow flex items-center gap-2">
-                    <Bot size={12} /> 03 · AI AGENT · AUTONOMOUS SKILL
+                    <Bot size={12} /> 03 · AI AGENT
                   </p>
                   <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
-                    Your Personal Clipping Team
+                    Your agent drives the pipeline
                   </h1>
                   <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
-                    Drop your videos in a folder and a team of AI clippers picks the viral moments, edits them, and queues them for your approval — like having a 24/7 short-form editing crew on autopilot.
+                    Connect Claude, ChatGPT, Cursor or n8n to the built-in MCP server. An agent
+                    can add a video, choose the moments, render clips and recut them — the
+                    transcript flow needs no model key of its own.
                   </p>
                 </div>
 
-                {/* Mobile-format warning */}
-                <div className="px-4 py-3 rounded-card border border-rule bg-paper2 flex items-start gap-3">
-                  <Smartphone size={18} className="text-warn shrink-0 mt-0.5" />
-                  <div className="text-sm text-ink2">
-                    <p className="font-medium text-ink mb-1">Upload videos already in vertical (9:16) mobile format.</p>
-                    <p className="text-muted leading-relaxed">
-                      The agent does not reframe horizontal footage. Make sure every source video is shot or pre-cropped to mobile/portrait format before dropping it into the input folder.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Workflow */}
                 <div className="grid md:grid-cols-3 gap-4">
                   <div className="card p-5 space-y-2">
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Upload size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">1. Drop your videos</h3>
+                    <h3 className="font-medium text-ink lowercase">1. Bring a source</h3>
                     <p className="text-xs text-muted leading-relaxed">
-                      Put your long-form vertical footage in the watched folder. The skill picks one video per run.
+                      <code className="text-ink2">process_video</code> takes a YouTube link or a
+                      direct video URL; <code className="text-ink2">create_upload</code> accepts a
+                      local file. <code className="text-ink2">get_job_status</code> follows the job.
                     </p>
                   </div>
 
@@ -1918,9 +1877,11 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Users size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">2. AI clippers work</h3>
+                    <h3 className="font-medium text-ink lowercase">2. Read the transcript</h3>
                     <p className="text-xs text-muted leading-relaxed">
-                      Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.
+                      <code className="text-ink2">prepare_transcript</code> downloads and transcribes
+                      once; <code className="text-ink2">get_transcript</code> returns the timestamped
+                      words so the agent can pick moments itself.
                     </p>
                   </div>
 
@@ -1928,62 +1889,22 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <CheckCircle2 size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">3. You validate, it ships</h3>
+                    <h3 className="font-medium text-ink lowercase">3. Render the cuts</h3>
                     <p className="text-xs text-muted leading-relaxed">
-                      Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.
+                      <code className="text-ink2">render_plan</code> renders the agent&apos;s chosen
+                      cuts from that same source; <code className="text-ink2">list_clips</code>,
+                      {' '}<code className="text-ink2">add_subtitles</code> and
+                      {' '}<code className="text-ink2">recut_clip</code> finish them.
                     </p>
                   </div>
                 </div>
 
-                {/* Repo CTA */}
-                <div className="card p-6 md:p-8 space-y-5">
-                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                    <div>
-                      <h2 className="font-display lowercase text-xl text-ink mb-1">skill-autoshorts</h2>
-                      <p className="text-sm text-muted">
-                        The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.
-                      </p>
-                    </div>
-                    <a
-                      href="https://github.com/mutonby/skill-autoshorts"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-primary py-2 px-4 text-sm shrink-0"
-                    >
-                      View on GitHub <ExternalLink size={14} />
-                    </a>
-                  </div>
+                <McpConnectCard cloud={false} />
 
-                  <div className="bg-paper border border-rule rounded-card p-4 font-mono text-xs text-ink2 flex items-center justify-between gap-3">
-                    <span className="truncate">git clone https://github.com/mutonby/skill-autoshorts</span>
-                    <button
-                      onClick={() => navigator.clipboard.writeText('git clone https://github.com/mutonby/skill-autoshorts')}
-                      className="text-muted hover:text-ink transition-colors shrink-0"
-                      title="Copy"
-                    >
-                      <Copy size={14} />
-                    </button>
-                  </div>
-
-                  <div className="grid sm:grid-cols-2 gap-3 text-sm">
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Daily batch — picks one long video per run</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Whisper transcription with word-level timing</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Gemini 3 Flash multimodal moment detection</span>
-                    </div>
-                    <div className="flex items-start gap-2 text-ink2">
-                      <Check size={16} className="text-brass shrink-0 mt-0.5" />
-                      <span>Auto-publish to TikTok, Reels & YouTube Shorts</span>
-                    </div>
-                  </div>
-                </div>
+                <p className="text-xs text-muted leading-relaxed">
+                  Running locally, the MCP endpoint has no authentication: anything that can reach
+                  this machine can drive it. Keep it bound to localhost.
+                </p>
 
               </div>
             </div>
@@ -2068,6 +1989,8 @@ function App() {
                   onProcess={handleProcess}
                   onProcessBatch={handleProcessBatch}
                   isProcessing={status === 'processing' || !!batch?.running}
+                  initialCollector={collectorPrefill}
+                  onInitialCollectorUsed={() => setCollectorPrefill(null)}
                 />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
@@ -2168,14 +2091,6 @@ function App() {
                     <span className="min-w-0 leading-snug break-words">
                       {logs.length ? logs[logs.length - 1] : 'starting up…'}
                     </span>
-                  </div>
-                )}
-
-                {/* The render is dead time: the user is watching a progress bar
-                    with nothing to do, so this is where the one star ask goes. */}
-                {status === 'processing' && (
-                  <div className="my-3">
-                    <StarBanner message="Got a minute while this renders?" />
                   </div>
                 )}
 
@@ -2470,7 +2385,8 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            Clip Studio needs a <strong className="text-ink2">Gemini</strong> API key for the AI
+            moment picker. The keyless agent flow does not need one.
           </p>
 
           {/* Gemini block */}

@@ -77,9 +77,11 @@ A new **Collector** page separates finding videos from clipping them:
 - **Download**: fetches the video into `Storage/collector/files` when you are
   ready; the card switches to "on disk".
 - **Upload**: a local file is stored immediately (`Storage/collector/files`)
-  with a poster frame.
+  with a poster frame taken 30 s in (the midpoint for clips shorter than that).
 - **Queue**: any card can be put in the queue. "Process queue" processes them
   one at a time, in order.
+- **Process**: opens the Clip Generator with that video already selected, so the
+  output format and options are chosen before a job starts.
 
 In the Clip Generator, source tab **Collector** opens a full-viewport picker
 over the shelf. **Bulk Mode** applies to all three sources — several uploads,
@@ -95,6 +97,46 @@ Clip Generator.
 | Posters | `Storage/collector/thumbs/<item>.jpg`, served at `/collector/thumbs/...` |
 | API | `GET/POST /api/collector`, `POST /api/collector/upload`, `POST /api/collector/{id}/download`, `POST /api/collector/{id}/queue`, `DELETE /api/collector/{id}` |
 | Processing | `POST /api/process` accepts `collector_id`; a downloaded file is hardlinked into the job, so the collector keeps its copy |
+
+## Clip Gallery — used / archived
+
+Each card has two pieces of review state, stored in
+`Storage/clip_state.json` (keyed `<job_id>:<index>`, so a re-render that renames
+the file keeps them):
+
+- **Used** — "I already posted this". The library has Library / Used / Unused
+  tabs; a used clip is not processed again by accident.
+- **Archived** — hides the card from the library but keeps the file. The
+  Archived tab restores one clip; **archive used (N)** moves every used clip in
+  one call.
+
+Filtering happens server-side (`GET /api/gallery/clips?view=active|archived|all`
+`&usage=any|used|unused`) before the page is cut, so the counts and infinite
+scroll agree. `PATCH /api/gallery/clip/{job_id}/{index}` sets the flags;
+`POST /api/gallery/archive-used` archives the used ones. Stale keys for deleted
+jobs are pruned on the next scan.
+
+The cards follow the clip's real aspect ratio (9:16, 1:1 or 16:9), and native
+fullscreen letterboxes with `object-fit: contain` instead of cropping.
+
+## Storage numbers
+
+The Home storage meter reads **used = the `Storage/` folder**, **total = the
+space the drive still has available**, with the raw capacity in the caption.
+Before, the total was the whole 310 GB drive, so a disk with 22 GB left looked
+almost empty. The API returns `usedGb`, `totalGb` (available), `freeGb` and
+`capacityGb` from `GET /api/overview`.
+
+## Branding — Clip Studio
+
+This private build is named **Clip Studio** and carries no upstream surface:
+no GitHub links, star banner, repo/skill cards, hosted pricing, contact address,
+screenshots, promo videos or SEO/OpenGraph metadata. `index.html` is a plain app
+shell, the drawer footer is gone, and the MCP snippets point at this machine
+(`/api/config` → `publicApiUrl`, from `PUBLIC_API_URL`). The MCP server's
+protocol name stays `openshorts` (client configs and tooling use it); only the
+displayed title is Clip Studio. `LICENSE` / `NOTICE` keep the upstream MIT
+attribution.
 
 ## Settings — only what this build uses
 
@@ -154,7 +196,7 @@ F:\openshorts-venv\Scripts\python.exe -m pytest -q
 
 `pytest` and the cloud-mode imports (`requirements-billing.txt`, needed only to
 collect those tests) are installed in the venv alongside the pipeline. The
-suite passes natively on Windows (2029 passed, 14 skipped); the skips are the
+suite passes natively on Windows (2069 passed, 14 skipped); the skips are the
 POSIX-only ones: the `bin/ffmpeg` flock wrapper, POSIX file modes, and the
 `flock`-based multi-instance simulations.
 

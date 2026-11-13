@@ -213,15 +213,20 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
                   <HardDrive size={13} className="text-muted" />
-                  <span className="readout">library disk</span>
+                  <span className="readout">library storage</span>
                 </div>
+                {/* Used = the Storage folder; total = the space the disk still
+                    has available, so the bar tracks how much of that room the
+                    library takes (not how full the whole drive is). */}
                 <Meter
-                  label="used"
+                  label="storage folder"
                   used={storage.usedGb}
                   total={storage.totalGb}
-                  right={`${storage.usedGb} / ${storage.totalGb} GB`}
+                  right={`${storage.usedGb} GB of ${storage.totalGb} GB free`}
                 />
-                <p className="text-[11px] text-muted">{storage.freeGb} GB free</p>
+                <p className="text-[11px] text-muted">
+                  {storage.freeGb} GB free of {storage.capacityGb || storage.totalGb} GB on this drive
+                </p>
               </div>
             ) : null}
 

@@ -264,3 +264,14 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Native fullscreen keeps the clip's real shape. Cards crop with
+   object-fit: cover to fill their box; in fullscreen the video element is the
+   whole screen, and cover would zoom into the middle of a 9:16 clip (or cut the
+   sides of a 16:9 one). Contain letterboxes it correctly instead. */
+video:fullscreen,
+video:-webkit-full-screen {
+  object-fit: contain !important;
+  background: #000;
+}
+

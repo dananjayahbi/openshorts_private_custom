@@ -140,7 +140,7 @@ export const CollectorCard = ({ item, onChanged, onProcessItem, compact = false 
                             disabled={busy}
                             onClick={() => onProcessItem?.(item)}
                             className="btn-quiet text-xs py-1.5 px-2.5"
-                            title="Process this video now"
+                            title="Open this video in the Clip Generator"
                         >
                             <Play size={13} /> process
                         </button>

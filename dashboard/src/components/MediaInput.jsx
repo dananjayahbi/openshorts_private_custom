@@ -34,7 +34,7 @@ const readVideoDuration = (file) => new Promise((resolve) => {
 
 const fileKey = (f) => `${f.name}:${f.size}:${f.lastModified}`;
 
-export default function MediaInput({ onProcess, onProcessBatch, isProcessing }) {
+export default function MediaInput({ onProcess, onProcessBatch, isProcessing, initialCollector, onInitialCollectorUsed }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     // File upload is the primary path; the link and the collector are next.
     const [mode, setMode] = useState('file'); // 'file' | 'url' | 'collector'
@@ -132,6 +132,24 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing }) 
             })
             .catch(() => {});
     }, []);
+
+    // A Collector card's "Process" opens this page with its video already
+    // selected. Applied once per handover (the same item can be handed over
+    // twice by clicking Process again).
+    const appliedPrefillRef = useRef(null);
+    useEffect(() => {
+        const incoming = initialCollector?.item;
+        if (!incoming) {
+            appliedPrefillRef.current = null;
+            return;
+        }
+        if (appliedPrefillRef.current === incoming.id) return;
+        appliedPrefillRef.current = incoming.id;
+        setBulk(false);
+        setMode('collector');
+        setPicked([incoming]);
+        onInitialCollectorUsed?.();
+    }, [initialCollector, onInitialCollectorUsed]);
 
     // A link pasted in the landing hero: preload it here so the user picks up
     // where they left off. Not auto-submitted — the rights attestation below
@@ -641,7 +659,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing }) 
                         className="mt-0.5 w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
                     />
                     <span>
-                        I confirm I own this content or have the rights to process it. I am responsible for any content I submit. See our <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors" onClick={(e) => e.stopPropagation()}>Terms</a> and <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors" onClick={(e) => e.stopPropagation()}>Privacy Policy</a>.
+                        I confirm I own this content or have the rights to process it. I am responsible for any content I submit.
                     </span>
                 </label>
 

@@ -70,28 +70,30 @@ export default function WatermarkModal({ onClose, onContinue, onUpgrade, preview
     style: 'currency', currency: (starter.currency || 'usd').toUpperCase(), maximumFractionDigits: 0,
   }).format((starter.amount || 0) / 100);
 
-  const src = previewSrc && !previewFailed ? previewSrc : '/demo/clip-vertical.mp4';
+  const src = previewSrc && !previewFailed ? previewSrc : null;
 
   return (
     <Modal isOpen onClose={() => close(false)} eyebrow="FREE PLAN" title="Want the watermark off?" size="md">
       <p className="text-muted text-sm mb-4">
-        Clips on the free plan carry the OpenShorts mark and are deleted after 7 days.
+        Clips on the free plan carry a watermark and are deleted after 7 days.
         Upgrade and <b className="text-ink font-medium">these exact clips lose the mark on the spot</b>,
         no re-render, and stay in your library for good.
       </p>
 
-      <div className="rounded-card border border-rule overflow-hidden bg-paper mb-5">
-        <video
-          key={src}
-          src={src}
-          autoPlay
-          muted
+      {src && (
+        <div className="rounded-card border border-rule overflow-hidden bg-paper mb-5">
+          <video
+            key={src}
+            src={src}
+            autoPlay
+            muted
           loop
           playsInline
           onError={() => setPreviewFailed(true)}
           className="w-full max-h-56 object-cover"
         />
-      </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <label className="flex items-center gap-2 text-sm text-muted cursor-pointer">

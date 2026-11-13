@@ -30,14 +30,11 @@ export default defineConfig({
     },
   },
   server: {
-    allowedHosts: [
-      'openshorts.app',
-      'www.openshorts.app'
-    ],
     proxy: {
       '/api': { target: backend, changeOrigin: true },
       '/videos': { target: backend, changeOrigin: true },
       '/thumbnails': { target: backend, changeOrigin: true },
+      '/collector': { target: backend, changeOrigin: true },
       '/gallery': { target: backend, changeOrigin: true },
       '/video': { target: backend, changeOrigin: true },
       '/render': { target: renderer, changeOrigin: true },
