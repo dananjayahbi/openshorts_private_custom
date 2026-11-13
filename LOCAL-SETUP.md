@@ -246,7 +246,49 @@ engine to run them against; a reinstall would need a full image rebuild.
 | C: free after uninstalling Docker | **71.7 GB** |
 
 
-## MCP — full agent control
+## AI prompts — what is hard-coded where
+
+There is no user-editable system prompt in the app. Every AI call sends a
+hard-coded instruction block defined as a module constant, with the transcript
+or candidate windows formatted into it. To change behaviour you edit the
+constant; nothing in Settings rewrites prompts.
+
+| Constant / file | Purpose |
+|---|---|
+| `gemini_worker.SCORE_PROMPT_TEMPLATE` | Active moment picker, pass 1: scores every candidate window 0-100 ("2-second test") |
+| `gemini_worker.DETAIL_PROMPT_TEMPLATE` | Pass 2: picks the final clips, writes hook, title, TikTok/IG captions, why |
+| `gemini_worker.LAYOUT_CHOICE_PROMPT` | Chooses split / screencast / single-crop layout per scene |
+| `gemini_worker.SHOT_CONTENT_PROMPT` | Describes what is on screen (screencast detection) |
+| `gemini_worker.GROUNDED_HOOK_PROMPT` | Checks hook text against frames (`hook_grounding.py`) |
+| `gemini_worker.VISUAL_PROMPT_TEMPLATE` | Silent/no-speech videos: picks moments from frames |
+| `editor.Editor.get_ffmpeg_filter` | Clip editor: effect decision list (applied by the deterministic FFmpeg renderer) |
+| `editor.Editor.get_effects_config` | Clip editor: zoom/brightness/contrast segments for the Remotion renderer |
+| `editor.Editor._repair_filter` | One self-repair round-trip when a generated FFmpeg filter fails |
+| `thumbnail.py` (5 prompts) | YouTube Studio: titles, title critic, refinement, thumbnail concepts, description |
+| `burned_subtitles.PROMPT` | Reads subtitles already burned into the source |
+| `free_tools.PROMPTS` | Free-tool generators (`/api/tools/*`: hashtags, captions, etc.; no nav page) |
+| `saasshorts.py` (3 prompts) | AI UGC videos; feature not exposed in this build |
+| `main.GEMINI_PROMPT_TEMPLATE` | Legacy whole-transcript selector; no longer referenced by the pipeline |
+
+How they run:
+
+- **Gemini** is the default (`GEMINI_API_KEY`, or a server-side key from the
+  environment). The model name is `GEMINI_MODEL` / the callers' default.
+- **Any OpenAI-compatible server** can take over the text moment picker
+  (`llm_backend.py`): set `LLM_PROVIDER=openai` (or leave it unset) and
+  `LLM_BASE_URL` (Ollama, LM Studio, vLLM, llama.cpp, LocalAI, OpenRouter),
+  optional `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT`. The same prompt constants
+  are sent; frame/video prompts (layout, on-screen content, silent videos)
+  still need Gemini.
+- **Clip count and length knobs** are not prompt text: `CLIP_TARGET_MIN/MAX`,
+  `CLIP_MIN_SECONDS` and `CLIP_MAX_SECONDS` (or the dashboard's advanced
+  options / `target_clips`, `clip_min_seconds`, `clip_max_seconds` form fields)
+  are formatted into the detail prompt.
+- **Agents** get no system prompt from this app. The MCP server exposes
+  `prepare_transcript` / `get_transcript` / `render_plan`, so the agent's own
+  system prompt decides which moments to cut.
+
+## MCP - full agent control
 
 The API already served an MCP endpoint at `/mcp` (Streamable HTTP, self-host
 open, no key). It now covers the whole pipeline *without any model key*: an
