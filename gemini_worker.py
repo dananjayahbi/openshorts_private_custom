@@ -40,6 +40,9 @@ class DetailClipModel(BaseModel):
     video_description_for_instagram: str
     video_title_for_youtube_short: str
     viral_hook_text: str
+    # Exactly five comma-separated tags for the post. Defaulted so a model that
+    # skips the field still validates; main normalises/tops it up to five.
+    tags: str = ""
     # One sentence on what makes THIS moment a clip, shown under the score in
     # the dashboard. Defaulted so a small local model that skips it does not
     # fail schema validation and lose the clip.
@@ -61,6 +64,7 @@ class VisualClipModel(BaseModel):
     video_description_for_instagram: str
     video_title_for_youtube_short: str
     viral_hook_text: str
+    tags: str = ""
 
 
 class VisualResponse(BaseModel):
@@ -82,8 +86,10 @@ TIME CONTRACT — STRICT:
 - Cut on visual scene changes, never mid-motion.
 
 For each clip write catchy copy in {language} (a scroll-stopping hook, a TikTok
-and an Instagram description, and a YouTube title ≤100 chars). Order clips best
-to worst by how likely they are to stop a viewer scrolling.
+and an Instagram description, a YouTube title ≤100 chars, and exactly five
+comma-separated tags: lowercase, no #, the concrete subjects/actions/names of
+the moment). Order clips best to worst by how likely they are to stop a viewer
+scrolling.
 """
 
 
@@ -343,6 +349,9 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
 COPY RULES — ALL text fields (descriptions, title, hook) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
 - Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff
   without spoiling it, then 3-5 topically relevant hashtags. No generic hashtag spam.
+- `tags`: exactly FIVE comma-separated tags in {language}: lowercase words, no
+  `#`, naming the concrete subjects, tools, people, numbers or actions of THIS
+  moment (not the whole video). Unique, no duplicates.
 - `video_title_for_youtube_short`: max 100 chars, curiosity-driven, no fake claims.
 - `predicted_score`: honest 0-100 estimate of viral potential.
 - `why`: one sentence, max 20 words, naming what makes THIS moment worth a
@@ -365,6 +374,7 @@ Return only:
       "video_description_for_instagram": "<description + hashtags>",
       "video_title_for_youtube_short": "<title max 100 chars>",
       "viral_hook_text": "<short overlay max 10 words>",
+      "tags": "<five comma-separated tags>",
       "why": "<one sentence, max 20 words>"
     }}
   ]

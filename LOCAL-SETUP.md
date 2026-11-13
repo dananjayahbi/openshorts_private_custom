@@ -107,6 +107,14 @@ transient error in video 2 does not repeat videos 1–4.
 
 ## Clip Gallery — used / archived
 
+Each clip card shows the **viral score** the moment picker predicted and its
+**five tags** (`tags` in the job's metadata, comma-separated, one copy button).
+The tags are written in the same detail call as the title/hook, so they cost no
+extra request; `clip_tags.five` normalises the answer (lowercase, no `#`,
+deduped) and tops it up from the clip's own hashtags/title so every clip has
+exactly five. Clips rendered before the field existed get five derived from
+their title/description on read, without rewriting old metadata.
+
 Each card has two pieces of review state, stored in
 `Storage/clip_state.json` (keyed `<job_id>:<index>`, so a re-render that renames
 the file keeps them):

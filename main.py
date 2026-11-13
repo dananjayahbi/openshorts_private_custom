@@ -31,6 +31,7 @@ import layout_picker
 import llm_backend
 import platform_compat
 import prompt_store
+import clip_tags
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
@@ -2107,6 +2108,19 @@ def score_batch_size():
     return 3 if primary.get("provider") == "openai" else 8
 
 
+def _apply_clip_tags(shorts):
+    """Give every clip exactly five comma-separated tags (see clip_tags)."""
+    for clip in shorts or []:
+        clip["tags"] = clip_tags.five(
+            clip.get("tags"),
+            clip.get("video_title_for_youtube_short")
+            or clip.get("title") or clip.get("viral_hook_text"),
+            (clip.get("video_description_for_tiktok"),
+             clip.get("video_description_for_instagram")),
+        )
+    return shorts
+
+
 def load_agent_plan(path, transcript, video_duration):
     """Clips chosen by an agent instead of the LLM moment picker.
 
@@ -2164,6 +2178,7 @@ def load_agent_plan(path, transcript, video_duration):
                 item.get('video_description_for_instagram') or description),
             "video_title_for_youtube_short": title,
             "viral_hook_text": hook,
+            "tags": clip_tags.five(item.get("tags"), title, (description,)),
             "why": item.get("why") or "Chosen by the agent from the transcript.",
             "proposed": [round(start, 3), round(end, 3)],
         })
@@ -2327,6 +2342,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
                   f"better-scored one.")
             shorts = deduped
+        _apply_clip_tags(shorts)
 
         # Aggregate cost across both passes.
         cost_analysis = None
@@ -2610,6 +2626,7 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
             shutil.rmtree(tmp_dir, ignore_errors=True)
         clean.sort(key=lambda c: c["start"])
         clean = trim_to_best(dedupe_overlapping(clean), v_max_clips)
+        _apply_clip_tags(clean)
 
         if not clean:
             print("⚠️ Vision pass returned no usable clips.")

@@ -181,6 +181,23 @@ export default function GalleryCard({ clip, onChanged }) {
                             {copied === 'caption' ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
                         </button>
                     </div>
+
+                    {/* Tags: the five comma-separated tags the pipeline writes */}
+                    <div className="bg-paper rounded-input p-2 relative group/item">
+                        <p className="eyebrow mb-1">Tags</p>
+                        <p className="text-xs text-ink2 select-all line-clamp-2 hover:line-clamp-none transition-all">
+                            {clip.tags || '—'}
+                        </p>
+                        {clip.tags && (
+                            <button
+                                onClick={() => handleCopy(clip.tags, 'tags')}
+                                className="absolute top-2 right-2 p-1 text-muted hover:text-brass transition-colors opacity-0 group-hover/item:opacity-100"
+                                title="Copy Tags"
+                            >
+                                {copied === 'tags' ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+                            </button>
+                        )}
+                    </div>
                 </div>
 
                 {error && <p className="text-[11px] text-danger mb-2" role="alert">{error}</p>}

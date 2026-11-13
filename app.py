@@ -2,6 +2,7 @@ import os
 import llm_backend
 import platform_compat
 import prompt_store
+import clip_tags
 import settings_store
 import caption_style as caption_style_mod
 import style_profiles
@@ -10337,17 +10338,25 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
         duration = max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
     except (TypeError, ValueError):
         duration = 0.0
+    title = (clip.get("video_title_for_youtube_short")
+             or clip.get("viral_hook_text")
+             or f"Clip {index + 1}")
     return {
         "job_id": job_id,
         "index": index,
-        "title": (clip.get("video_title_for_youtube_short")
-                  or clip.get("viral_hook_text")
-                  or f"Clip {index + 1}"),
+        "title": title,
         "hook": clip.get("viral_hook_text"),
         "url": f"/videos/{job_id}/{os.path.basename(filename)}",
         "duration": duration,
         "created_at": created_at,
         "score": clip.get("predicted_score"),
+        # Clips made before tags existed get the same five derived from their
+        # own title/description, so the gallery is consistent without editing
+        # old metadata on disk.
+        "tags": clip.get("tags") or clip_tags.five(
+            None, title,
+            (clip.get("video_description_for_tiktok"),
+             clip.get("video_description_for_instagram"))),
         "tiktok_desc": clip.get("video_description_for_tiktok"),
         "insta_desc": clip.get("video_description_for_instagram"),
     }

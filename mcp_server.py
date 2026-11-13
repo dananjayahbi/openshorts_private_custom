@@ -702,6 +702,7 @@ def _clip_summaries(job_id, result):
             "youtube_title": clip.get("video_title_for_youtube_short"),
             "tiktok_description": clip.get("video_description_for_tiktok"),
             "instagram_description": clip.get("video_description_for_instagram"),
+            "tags": clip.get("tags") or "",
         })
     return out
 
