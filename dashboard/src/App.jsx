@@ -395,6 +395,10 @@ function App() {
   const [profilePrefill, setProfilePrefill] = useState(null);
   const [playgroundProfile, setPlaygroundProfile] = useState(null);
   const batchCancelRef = useRef(false);
+  // A batch loop lives in this tab; two clicks on "process queue" used to start
+  // two loops over the same videos (duplicate jobs, the same item processed
+  // twice). This is the guard the state alone cannot provide.
+  const batchRunRef = useRef(false);
   const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, playground, profiles, ai-agent, thumbnails, settings
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
@@ -1333,7 +1337,10 @@ function App() {
     }
   };
 
-  const waitForJob = async (id) => {
+  // Poll one job to its end. ``onSnapshot`` gets every status payload, so the
+  // batch view can show the same per-video log tail the single-job view does
+  // instead of only "processing…" with no diagnosis when a run fails.
+  const waitForJob = async (id, onSnapshot) => {
     const started = Date.now();
     // A 6 h ceiling: a very long source can legitimately take a while, and the
     // server's own job timeout is the real limit.
@@ -1343,6 +1350,7 @@ function App() {
         const res = await apiFetch(`/api/status/${id}`);
         if (!res.ok) continue;
         const state = await res.json();
+        try { onSnapshot?.(state); } catch { /* rendering must not end polling */ }
         const status = String(state.status || '').toLowerCase();
         if (status === 'completed' || status === 'complete') return 'completed';
         if (status === 'failed' || status === 'cancelled' || status === 'error') return status;
@@ -1351,7 +1359,85 @@ function App() {
     return 'timeout';
   };
 
+  // Run a subset of the batch's rows, one video at a time, patching the live
+  // rows: used by the first pass and by "retry failed" (which keeps the rows
+  // that already succeeded instead of starting a new batch).
+  const runBatchRows = async (items, options, indices) => {
+    const patch = (index, fields) => setBatch((current) => {
+      if (!current) return current;
+      const nextRows = current.rows.slice();
+      nextRows[index] = { ...nextRows[index], ...fields };
+      return { ...current, rows: nextRows };
+    });
+
+    for (const i of indices) {
+      if (batchCancelRef.current) {
+        patch(i, { state: 'cancelled', finishedAt: Date.now() });
+        continue;
+      }
+      patch(i, {
+        state: 'submitting',
+        jobId: null,
+        error: '',
+        logs: [],
+        logTimes: [],
+        startedAt: Date.now(),
+        finishedAt: null,
+      });
+      let lastLogs = [];
+      let lastStatus = '';
+      try {
+        const data = {
+          ...items[i],
+          ...options,
+          acknowledged: options.acknowledged !== false,
+        };
+        const { headers, body } = buildProcessRequest(data);
+        const res = await apiFetch('/api/process', { method: 'POST', headers, body });
+        if (!res.ok) throw new Error(await errorText(res));
+        const payload = await res.json();
+        if (payload.needs_confirmation) {
+          patch(i, {
+            state: 'failed',
+            finishedAt: Date.now(),
+            error: 'Resolution too low — run it alone to confirm.',
+          });
+          continue;
+        }
+        patch(i, { state: 'running', jobId: payload.job_id });
+        const final = await waitForJob(payload.job_id, (state) => {
+          lastStatus = String(state.status || '').toLowerCase();
+          lastLogs = Array.isArray(state.logs) ? state.logs : lastLogs;
+          patch(i, {
+            logs: lastLogs,
+            logTimes: Array.isArray(state.log_times) ? state.log_times : [],
+            progress: state.progress ?? null,
+          });
+        });
+        if (final === 'completed') {
+          patch(i, { state: 'done', finishedAt: Date.now() });
+        } else if (final === 'cancelled') {
+          patch(i, { state: 'cancelled', finishedAt: Date.now() });
+        } else {
+          // The server's own error line is the useful one; a bare "job failed"
+          // made a provider error indistinguishable from a bad source file.
+          const tail = [...lastLogs].reverse().find((line) => line && String(line).trim());
+          patch(i, {
+            state: 'failed',
+            finishedAt: Date.now(),
+            error: tail ? String(tail).slice(0, 300) : `job ${final}${lastStatus ? ` (${lastStatus})` : ''}`,
+          });
+        }
+      } catch (e) {
+        patch(i, { state: 'failed', finishedAt: Date.now(), error: String(e.message || e).slice(0, 300) });
+      }
+    }
+    setBatch((current) => (current ? { ...current, running: false } : current));
+    refreshMe();
+  };
+
   const handleProcessBatch = async ({ items, outputFormat, acknowledged, ...options }) => {
+    if (batchRunRef.current) return;
     if (billingEnabled) {
       if (!isSignedIn) { setShowLogin(true); return; }
       if (!isManaged) { window.location.hash = '#/pricing'; return; }
@@ -1368,50 +1454,51 @@ function App() {
       state: 'waiting',
       jobId: null,
       error: '',
+      logs: [],
+      logTimes: [],
+      startedAt: null,
+      finishedAt: null,
     }));
+    const batchOptions = { outputFormat, acknowledged, ...options };
 
     batchCancelRef.current = false;
-    setBatch({ rows, running: true, startedAt: Date.now() });
+    setBatch({
+      rows, running: true, startedAt: Date.now(),
+      items: list, options: batchOptions,
+    });
     setActiveTab('dashboard');
+    batchRunRef.current = true;
+    try {
+      await runBatchRows(list, batchOptions, list.map((_item, i) => i));
+    } finally {
+      batchRunRef.current = false;
+    }
+  };
 
-    const patch = (index, fields) => setBatch((current) => {
+  // Re-run only the rows that failed (or were stopped), keeping the finished
+  // ones: a transient provider error in video 2 of 5 should not repeat 1-4.
+  const retryFailedBatch = () => {
+    if (!batch || batch.running || batchRunRef.current) return;
+    const failed = batch.rows
+      .map((row, index) => ({ row, index }))
+      .filter(({ row }) => row.state === 'failed' || row.state === 'cancelled');
+    if (!failed.length) return;
+    const indices = failed.map(({ index }) => index);
+    batchCancelRef.current = false;
+    setBatch((current) => {
       if (!current) return current;
       const nextRows = current.rows.slice();
-      nextRows[index] = { ...nextRows[index], ...fields };
-      return { ...current, rows: nextRows };
-    });
-
-    for (let i = 0; i < list.length; i += 1) {
-      if (batchCancelRef.current) {
-        patch(i, { state: 'cancelled' });
-        continue;
-      }
-      patch(i, { state: 'submitting' });
-      try {
-        const data = {
-          ...list[i],
-          outputFormat,
-          acknowledged: acknowledged !== false,
-          ...options,
+      for (const i of indices) {
+        nextRows[i] = {
+          ...nextRows[i], state: 'waiting', error: '', jobId: null,
+          logs: [], logTimes: [], startedAt: null, finishedAt: null,
         };
-        const { headers, body } = buildProcessRequest(data);
-        const res = await apiFetch('/api/process', { method: 'POST', headers, body });
-        if (!res.ok) throw new Error(await errorText(res));
-        const payload = await res.json();
-        if (payload.needs_confirmation) {
-          patch(i, { state: 'failed', error: 'Resolution too low — run it alone to confirm.' });
-          continue;
-        }
-        patch(i, { state: 'running', jobId: payload.job_id });
-        const final = await waitForJob(payload.job_id);
-        if (final === 'completed') patch(i, { state: 'done' });
-        else patch(i, { state: 'failed', error: `job ${final}` });
-      } catch (e) {
-        patch(i, { state: 'failed', error: String(e.message || e).slice(0, 300) });
       }
-    }
-    setBatch((current) => (current ? { ...current, running: false } : current));
-    refreshMe();
+      return { ...current, rows: nextRows, running: true };
+    });
+    batchRunRef.current = true;
+    runBatchRows(batch.items, batch.options, indices)
+      .finally(() => { batchRunRef.current = false; });
   };
 
   const BATCH_DEFAULTS = {
@@ -1950,6 +2037,7 @@ function App() {
               batch={batch}
               onCancel={stopBatch}
               onOpenGallery={() => goToTab('gallery')}
+              onRetryFailed={retryFailedBatch}
               onDismiss={() => { setBatch(null); setStatus('idle'); }}
             />
           )}

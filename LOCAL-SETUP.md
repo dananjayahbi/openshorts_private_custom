@@ -86,9 +86,16 @@ A new **Collector** page separates finding videos from clipping them:
 In the Clip Generator, source tab **Collector** opens a full-viewport picker
 over the shelf. **Bulk Mode** applies to all three sources — several uploads,
 one URL per line, or a multi-select from the collector — and the batch runs
-sequentially with per-item progress (the Clips land in the Clip Gallery as each
+sequentially with per-item progress (the clips land in the Clip Gallery as each
 job finishes). The queue button works from either the Collector page or the
 Clip Generator.
+
+The batch view keeps a **terminal per video**: every row polls that job's
+`/api/status` and shows the same log tail (with timestamps) as the single-job
+screen. A failed row shows the pipeline's own last line — an AI provider that
+returned nothing, a download error, a source with no audio — instead of a bare
+"job failed", and a **retry failed** button re-runs only the failed rows, so a
+transient error in video 2 does not repeat videos 1–4.
 
 | Piece | Where |
 |---|---|
