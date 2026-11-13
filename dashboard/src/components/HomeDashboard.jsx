@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  ArrowRight, Cpu, Film, HardDrive, Loader2, Play, Scissors, Youtube,
+  ArrowRight, Cpu, Film, HardDrive, Loader2, MemoryStick, Play, Scissors, Youtube,
 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { getApiUrl } from '../config';
@@ -63,6 +63,8 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
   const [loaded, setLoaded] = useState(false);
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
+  const [unloading, setUnloading] = useState(false);
+  const [vramMsg, setVramMsg] = useState('');
 
   const load = useCallback(async () => {
     const [ov, gal] = await Promise.allSettled([
@@ -97,6 +99,32 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
 
   const gpu = overview?.gpu;
   const storage = overview?.storage || {};
+  const jobRunning = (overview?.activeJobs || 0) > 0;
+
+  // Drop the models the long-lived API process holds (in-process subtitle,
+  // thumbnail and editor passes) and report what nvidia-smi saw change. The
+  // server refuses while a job is running, because that job owns its own
+  // process and unloading under it would fail the render.
+  const unloadVram = async () => {
+    setUnloading(true);
+    setVramMsg('');
+    try {
+      const res = await apiJson('/api/gpu/unload', { method: 'POST' });
+      await load();
+      const after = res.afterMb == null ? null : (res.afterMb / 1024).toFixed(1);
+      if (res.freedMb > 0) {
+        setVramMsg(`Freed ${res.freedMb} MB — ${after} GB still in use.`);
+      } else if (res.beforeMb == null) {
+        setVramMsg('Models unloaded. nvidia-smi is unavailable, so the change could not be measured.');
+      } else {
+        setVramMsg(`Models unloaded; nothing measurable was freed — ${after} GB is used by other processes.`);
+      }
+    } catch (e) {
+      setVramMsg(e.detail || String(e.message || e).slice(0, 240));
+    } finally {
+      setUnloading(false);
+    }
+  };
 
   return (
     <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar">
@@ -207,6 +235,27 @@ export default function HomeDashboard({ onStartClip, onOpenGallery, onOpenClips 
                 image does not ship. Jobs still run on the GPU — the native install reports this
                 panel in full.
               </p>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-rule">
+              <span className="text-[11px] text-muted lowercase">models held by the app</span>
+              <button
+                type="button"
+                onClick={unloadVram}
+                disabled={unloading || jobRunning}
+                className="btn-quiet text-xs px-2.5 py-1.5"
+                title={jobRunning
+                  ? 'A job is running. Unload after it finishes.'
+                  : 'Unload the models the API keeps in memory and free their VRAM'}
+              >
+                {unloading
+                  ? <Loader2 size={13} className="animate-spin" />
+                  : <MemoryStick size={13} />}
+                unload vram
+              </button>
+            </div>
+            {vramMsg && (
+              <p className="text-[11px] leading-relaxed text-muted" role="status">{vramMsg}</p>
             )}
 
             {storage.totalGb ? (

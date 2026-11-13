@@ -445,7 +445,11 @@ def detect_face_candidates(frame):
     height, width, _ = frame.shape
     small, _scale = _detection_frame(frame)
     rgb_frame = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    global face_detection
     with DETECT_LOCK:
+        if face_detection is None:
+            face_detection = mp_face_detection.FaceDetection(
+                model_selection=1, min_detection_confidence=0.5)
         results = face_detection.process(rgb_frame)
     
     candidates = []
@@ -474,8 +478,12 @@ def detect_person_yolo(frame):
     ORIGINAL frame coordinates (inference runs on a downscaled copy).
     """
     small, scale = _detection_frame(frame)
-    # Use the globally loaded model
+    # Use the globally loaded model; reload if the Unload VRAM action dropped
+    # it (the API process is long-lived and can outlive its models).
+    global model
     with DETECT_LOCK:
+        if model is None:
+            model = YOLO(os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
         results = model(small, verbose=False, classes=[0]) # class 0 is person
 
     if not results:

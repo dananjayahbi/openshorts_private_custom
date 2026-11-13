@@ -5216,15 +5216,16 @@ async def delete_style_profile(profile_id: str):
 _overview_gpu_cache = {"at": 0.0, "gpu": None}
 
 
-def _gpu_snapshot():
+def _gpu_snapshot(fresh=False):
     """GPU name, memory and utilisation from one nvidia-smi call, cached 10 s.
 
     The home dashboard refreshes this while it is open; without the cache that
     would fork a process every few seconds on the same 6 GB card the pipeline
-    is rendering on.
+    is rendering on. ``fresh=True`` skips the cache for the before/after
+    readings of the Unload VRAM action.
     """
     now = time.monotonic()
-    if now - _overview_gpu_cache["at"] < 10:
+    if not fresh and now - _overview_gpu_cache["at"] < 10:
         return _overview_gpu_cache["gpu"]
     gpu = None
     try:
@@ -5247,6 +5248,89 @@ def _gpu_snapshot():
         gpu = None
     _overview_gpu_cache.update(at=now, gpu=gpu)
     return gpu
+
+
+def _unload_gpu_models():
+    """Drop every model this long-lived API process holds; return what went.
+
+    Job processes are short-lived, so their models die with them. The API is
+    different: the subtitle re-burn, the thumbnail studio and the clip editor
+    run models in-process, and those stay resident (measured 7.7 GB idle in
+    prod, 17-sep-2026). ``transcribe_backends.release_models`` already drops
+    the ASR models and TransNetV2; this also drops the YOLO/mediapipe pair an
+    in-process ``import main`` leaves behind, then empties the CUDA cache.
+    """
+    released = []
+    try:
+        import transcribe_backends
+        transcribe_backends.release_models()
+        released.append("asr")
+    except Exception as e:  # one missing piece must not stop the rest
+        print(f"⚠️ [gpu] ASR release failed ({type(e).__name__}: {e})")
+
+    main_mod = sys.modules.get("main")
+    if main_mod is not None:
+        if getattr(main_mod, "model", None) is not None:
+            main_mod.model = None
+            released.append("yolo")
+        face = getattr(main_mod, "face_detection", None)
+        if face is not None:
+            try:
+                face.close()
+            except Exception:
+                pass
+            main_mod.face_detection = None
+            released.append("mediapipe")
+
+    # release_models clears this too; kept as a belt-and-braces for a future
+    # caller that imports scene_detection without the ASR module.
+    scene = sys.modules.get("scene_detection")
+    if scene is not None and getattr(scene, "_tn2_model", None) is not None:
+        scene._tn2_model = None
+        released.append("scene-model")
+
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    return released
+
+
+@app.post("/api/gpu/unload")
+async def unload_gpu():
+    """Free VRAM held by models in the API process (Home → unload vram).
+
+    Refused while a job is queued or processing: dropping the models mid-render
+    would fail that job, and its own process releases them when it exits.
+    """
+    finished = {"completed", "complete", "failed", "cancelled", "error"}
+    active = sum(1 for j in jobs.values()
+                 if str(j.get("status") or "").lower() not in finished)
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=("A job is running. Let it finish before unloading VRAM; "
+                    "the job process releases its own models when it exits."))
+    before = _gpu_snapshot(fresh=True)
+    released = await asyncio.to_thread(_unload_gpu_models)
+    after = _gpu_snapshot(fresh=True)
+    freed = 0
+    if before and after:
+        freed = max(0, int(before.get("usedMb") or 0) - int(after.get("usedMb") or 0))
+    _overview_gpu_cache.update(at=0.0, gpu=after)
+    print(f"[gpu] unload released={released or 'nothing'} freed={freed} MB")
+    return {
+        "ok": True,
+        "released": released,
+        "beforeMb": before.get("usedMb") if before else None,
+        "afterMb": after.get("usedMb") if after else None,
+        "freedMb": freed,
+    }
 
 
 @app.get("/api/overview")

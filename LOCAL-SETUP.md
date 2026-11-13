@@ -233,6 +233,26 @@ Other differences and how they are handled:
   to `4.0.541` (matching `remotion/package-lock.json`) and adds
   `react`/`react-dom` 18.3.1, which `@remotion/renderer` needs as peers.
 
+## Unload VRAM (Home)
+
+The API is a long-lived process, and three in-process passes load models into
+it: the subtitle re-burn, the thumbnail studio and the clip editor. In prod
+those held 7.7 GB idle (`transcribe_backends.release_models` documents the
+measured failure). Home → machine → **unload vram** calls
+`POST /api/gpu/unload`, which:
+
+- refuses with 409 while a job is queued/processing (the job owns its own
+  process and releases its models when it exits),
+- drops the ASR models, TransNetV2, the YOLO model and mediapipe's face
+  detector, runs `gc.collect()`, then `torch.cuda.empty_cache()` /
+  `ipc_collect()`,
+- reports `beforeMb`, `afterMb`, `freedMb` and what was released. The headline
+  "used" includes other apps (browser, desktop), so the message says so when
+  nothing measurable changed.
+
+Both models now reload lazily if a later in-process call needs them
+(`detect_person_yolo`, `detect_face_candidates`), so unloading is safe.
+
 ## Tests
 
 ```powershell
