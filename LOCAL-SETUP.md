@@ -605,6 +605,12 @@ this is a single-user local tool, not a storefront.
 YouTube player and mirror playback while downloading. The log tail and status
 line are the only progress UI now.
 
+**No rights checkbox on the generator.** This is a single-user local install
+processing the user's own files, so the "I confirm I own this content…" tick
+box is gone and it no longer gates **Generate Clips**. The request still sends
+`acknowledged: true`, so the backend check and the cloud mode attestation are
+untouched.
+
 **Home** (`/api/overview`): clips and videos rendered on this machine, active
 jobs, library disk usage, GPU panel (VRAM, utilisation, temperature) and the
 last four clips. The GPU panel needs `nvidia-smi`; the container image does not

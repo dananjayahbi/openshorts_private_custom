@@ -53,7 +53,10 @@ def test_the_mcp_card_points_at_this_install():
     assert "13 tools" in card
 
 
-def test_media_attestation_has_no_dead_legal_links():
+def test_media_attestation_checkbox_is_gone_on_this_local_build():
     src = _read(SRC, "components", "MediaInput.jsx")
-    assert "I confirm I own this content" in src
-    assert 'href="/terms"' not in src and 'href="/privacy"' not in src
+    # Single-user local install: the rights tick box and its gate are gone.
+    assert "I confirm I own this content" not in src
+    assert "acknowledged" in src and "acknowledged: true" in src
+    assert "Tick the rights confirmation" not in src
+    assert "setAcknowledged" not in src

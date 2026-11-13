@@ -49,7 +49,6 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     const [durations, setDurations] = useState({});
     const [picked, setPicked] = useState([]);
     const [pickerOpen, setPickerOpen] = useState(false);
-    const [acknowledged, setAcknowledged] = useState(false);
     // {start, end} in seconds when the user picked a stretch under the cost line.
     const [range, setRange] = useState(null);
     const [outputFormat, setOutputFormat] = useState('vertical'); // vertical | horizontal | square
@@ -207,8 +206,8 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     }, [initialProfile, onInitialProfileUsed]);
 
     // A link pasted in the landing hero: preload it here so the user picks up
-    // where they left off. Not auto-submitted — the rights attestation below
-    // has to be ticked by the user.
+    // where they left off. Not auto-submitted — the user still picks the job's
+    // options and presses generate.
     useEffect(() => {
         let pending = null;
         try {
@@ -268,7 +267,6 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!acknowledged) return;
         rememberOptions();
         const options = advanced();
 
@@ -306,10 +304,6 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                 setQueueError('The queue is empty. Add videos to it on the Collector page.');
                 return;
             }
-            if (!acknowledged) {
-                setQueueError('Tick the rights confirmation below first.');
-                return;
-            }
             rememberOptions();
             onProcessBatch?.({
                 items: queued.map((i) => ({ type: 'collector', payload: i.id, label: i.title })),
@@ -333,7 +327,10 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         setFiles((prev) => prev.filter((_, i) => i !== index));
     };
 
-    const canSubmit = acknowledged && (
+    // A local install processes the user's own files; no rights checkbox gates
+    // the button any more. The payload still says acknowledged so the backend
+    // contract (and cloud mode's attestation) keeps working unchanged.
+    const canSubmit = (
         (mode === 'url' && (bulk ? bulkUrls.length > 0 : !!url))
         || (mode === 'file' && (bulk ? files.length > 0 : (!!singleFile && !fileTooShort)))
         || (mode === 'collector' && picked.length > 0)
@@ -773,18 +770,6 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                         </div>
                     )}
                 </div>
-
-                <label className="flex items-start gap-2.5 mt-5 text-left text-[13px] sm:text-xs leading-relaxed text-muted cursor-pointer select-none">
-                    <input
-                        type="checkbox"
-                        checked={acknowledged}
-                        onChange={(e) => setAcknowledged(e.target.checked)}
-                        className="mt-0.5 w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
-                    />
-                    <span>
-                        I confirm I own this content or have the rights to process it. I am responsible for any content I submit.
-                    </span>
-                </label>
 
                 <button
                     type="submit"
