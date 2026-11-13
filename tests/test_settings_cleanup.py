@@ -20,13 +20,18 @@ def _read(path):
 
 
 def test_settings_keeps_only_the_pipeline_key_and_agent_howto():
-    app = _read("App.jsx")
-    assert "<KeyInput" in app
-    assert "<McpConnectCard" in app
+    # The sections moved into SettingsPage when the provider chain and prompt
+    # editors were added. Keys are configured per provider now (no dedicated
+    # Gemini card), so the guard checks the real control surfaces.
+    page = _read("components/SettingsPage.jsx")
+    assert "AI providers" in page
+    assert "system prompts" in page
+    assert "<McpConnectCard" in page
     for gone in ("Social Integration", "Video Translation", "AI Shorts (UGC Videos)"):
-        assert gone not in app, gone
+        assert gone not in page, gone
+        assert gone not in _read("App.jsx"), gone
     # The fal.ai state existed only for the removed AI Shorts card.
-    assert "falKey" not in app
+    assert "falKey" not in _read("App.jsx")
 
 
 def test_the_agent_is_not_labelled_byok():

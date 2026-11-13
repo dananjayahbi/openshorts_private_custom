@@ -227,6 +227,10 @@ export function AuthProvider({ children }) {
     // Self-host: the server already holds a Gemini key in its environment, so
     // the dashboard does not have to nag for one in Settings.
     geminiEnvKey: !!config.geminiEnvKey,
+    // Self-host: at least one level of the Settings provider chain can answer,
+    // so a browser-side Gemini key is not required.
+    llmConfigured: !!config.llmConfigured,
+    geminiConfigured: !!config.geminiConfigured,
     googleAuthEnabled: config.googleAuthEnabled,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
     loading,

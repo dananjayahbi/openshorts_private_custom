@@ -121,45 +121,40 @@ def frames_at(video_path, times, width=None):
     return out
 
 
-def _ask_gemini(frames, prompt, api_key):
-    """One vision call; returns the parsed dict. Split out so tests can stub it."""
-    from google import genai
-    from google.genai import types as genai_types
-    import gemini_worker
+def _ask_gemini(frames, prompt, api_key=None):
+    """One vision call; returns the parsed dict. Split out so tests can stub it.
 
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or "gemini-3.1-flash-lite"
-    parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
-    response = client.models.generate_content(
-        model=model_name,
-        contents=parts + [prompt],
-        config=genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=gemini_worker.GroundedHook,
-        ))
-    gemini_worker.raise_if_blocked(response)
-    return json.loads(response.text) or {}
+    The name is historical (the first provider was Gemini); the call goes to
+    whichever configured level can see images.
+    """
+    import gemini_worker
+    import llm_backend
+
+    return llm_backend.generate_vision_json(
+        prompt, gemini_worker.GroundedHook, frames)
 
 
 def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
     """Rewrite ``clip['viral_hook_text']`` / ``video_title_for_youtube_short``
     in place from the clip's frames. Returns what changed (also stored under
     ``clip['hook_grounding']``), or None when skipped or failed."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("   🪝 Hook grounding skipped: needs a Gemini key (frames), "
+    import llm_backend
+
+    api_key = llm_backend.gemini_key()
+    if not llm_backend.vision_available():
+        print("   🪝 Hook grounding skipped: no vision-capable AI provider, "
               "keeping the transcript hook.")
         return None
     try:
-        import gemini_worker
+        import prompt_store
 
         times = sample_times(clip.get("layout_ranges"), float(end) - float(start))
         frames = frames_at(clip_path, times)
         if not frames:
             return None
         language = str((transcript or {}).get("language") or "unknown")
-        prompt = gemini_worker.GROUNDED_HOOK_PROMPT.format(
-            language=language,
+        prompt = prompt_store.render(
+            "hook_grounding", language=language,
             current_hook=clip.get("viral_hook_text") or "",
             current_title=clip.get("video_title_for_youtube_short") or "",
             transcript=clip_words(transcript, start, end)[:4000] or "(no speech)")

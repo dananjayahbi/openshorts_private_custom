@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers } from 'lucide-react';
-import KeyInput from './components/KeyInput';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers, FlaskConical, Palette } from 'lucide-react';
 import MediaInput from './components/MediaInput';
+import SettingsPage from './components/SettingsPage';
 import Collector from './components/Collector';
 import BatchQueue from './components/BatchQueue';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
 import HomeDashboard from './components/HomeDashboard';
+import Playground from './components/Playground';
+import StyleProfiles from './components/StyleProfiles';
 // import Gallery from './components/Gallery';
 import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
@@ -271,7 +273,7 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, geminiEnvKey, loading: authLoading } = useAuth();
+  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds, localLlm, geminiEnvKey, llmConfigured, geminiConfigured, loading: authLoading } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   // Free plan: "want the watermark off?" once per job, when the clips land.
@@ -342,7 +344,6 @@ function App() {
     try { return localStorage.getItem('os_autopilot_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [autopilotOn, setAutopilotOn] = useState(false);
-  const [showKeyModal, setShowKeyModal] = useState(false);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
@@ -389,8 +390,12 @@ function App() {
   // {item, at}: a Collector card's "Process" hands its video to the Clip
   // Generator instead of submitting a job behind the user's back.
   const [collectorPrefill, setCollectorPrefill] = useState(null);
+  // Style Profiles: one applies a look to the generator, the other is opened
+  // in the Playground for editing.
+  const [profilePrefill, setProfilePrefill] = useState(null);
+  const [playgroundProfile, setPlaygroundProfile] = useState(null);
   const batchCancelRef = useRef(false);
-  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, ai-agent, thumbnails, settings
+  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, playground, profiles, ai-agent, thumbnails, settings
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
@@ -921,7 +926,7 @@ function App() {
   // Upload-Post is deliberately NOT required: it only powers one-click social
   // publishing, and clips are generated, downloaded and uploaded by hand
   // without it. A missing key hides the posting buttons, nothing else.
-  const geminiOk = !!apiKey || !!localLlm || !!geminiEnvKey;
+  const geminiOk = !!apiKey || !!localLlm || !!geminiEnvKey || !!llmConfigured;
   const keysMissing = !billingEnabled && !geminiOk;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
@@ -1171,6 +1176,14 @@ function App() {
       // The stretch picked under the cost line (seconds); absent = whole video.
       source_start: data.sourceStart ?? null,
       source_end: data.sourceEnd ?? null,
+      // Pre-generation look: a JSON object (stringified for form posts) that
+      // the pipeline merges over the shipped caption defaults.
+      caption_style: data.captionStyle ? JSON.stringify(data.captionStyle) : null,
+      // Captions are on by default; the generator panel can turn them off.
+      captions: data.captions === false ? '0' : '1',
+      // A named bundle (look + output + prompts). The backend applies any
+      // field the dashboard left unset, and prompt overrides for the job.
+      style_profile_id: data.styleProfileId || null,
     };
 
     if (data.type === 'url' || data.type === 'thumbnail_session' || data.type === 'collector') {
@@ -1208,7 +1221,9 @@ function App() {
       if (!isSignedIn) { stashPendingJob(data); setShowLogin(true); return; }
       if (!isManaged) { window.location.hash = '#/pricing'; return; }
     } else if (keysMissing) {
-      setShowKeyModal(true);
+      // No provider chain and no environment key: the fix is in Settings now,
+      // not a paste-this-Gemini-key modal.
+      goToTab('settings');
       return;
     }
     // Past every gate, so this request is really running: nothing left to resume.
@@ -1341,7 +1356,7 @@ function App() {
       if (!isSignedIn) { setShowLogin(true); return; }
       if (!isManaged) { window.location.hash = '#/pricing'; return; }
     } else if (keysMissing) {
-      setShowKeyModal(true);
+      goToTab('settings');
       return;
     }
     const list = items || [];
@@ -1419,6 +1434,23 @@ function App() {
     goToTab('dashboard');
   };
 
+  // Style Profiles → Clip Generator / Playground.
+  const useStyleProfile = (profile) => {
+    if (!profile) return;
+    setBatch(null);
+    setStatus('idle');
+    setProfilePrefill({ profile, at: Date.now() });
+    goToTab('dashboard');
+  };
+  const editStyleProfile = (profile) => {
+    setPlaygroundProfile(profile || null);
+    goToTab('playground');
+  };
+  const newStyleProfile = () => {
+    setPlaygroundProfile(null);
+    goToTab('playground');
+  };
+
   const processCollectorQueue = (items) => handleProcessBatch({
     ...BATCH_DEFAULTS,
     items: (items || []).map((item) => ({
@@ -1487,9 +1519,11 @@ function App() {
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
     { id: 'collector', ord: '03', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
-    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent' },
-    { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio' },
-    { id: 'settings', ord: '06', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'playground', ord: '04', icon: FlaskConical, label: 'Playground', short: 'play' },
+    { id: 'profiles', ord: '05', icon: Palette, label: 'Style Profiles', short: 'styles' },
+    { id: 'ai-agent', ord: '06', icon: Bot, label: 'AI Agent', short: 'agent' },
+    { id: 'thumbnails', ord: '07', icon: Image, label: 'YouTube Studio', short: 'studio' },
+    { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -1563,7 +1597,7 @@ function App() {
           <button
             onClick={() => goToTab('settings')}
             className="badge-warn hidden sm:inline-flex"
-            title="Set your Gemini API key"
+            title="Configure an AI provider"
           >
             <AlertTriangle size={12} />
             <span className="hidden md:inline">keys missing</span>
@@ -1705,9 +1739,10 @@ function App() {
             <div className="flex items-start sm:items-center gap-2.5 sm:gap-3 text-sm text-ink2 min-w-0 flex-1">
               <KeyRound size={16} className="shrink-0 text-warn mt-0.5 sm:mt-0" />
               <div className="min-w-0">
-                <span className="font-medium text-ink">Gemini API key missing.</span>{' '}
+                <span className="font-medium text-ink">No AI provider configured.</span>{' '}
                 <span className="text-muted">
-                  Set a key to use Clip Studio's AI picker. Everything else runs locally.
+                  Add one in Settings (OpenAI-compatible, Gemini, OpenRouter…).
+                  Everything else runs locally.
                 </span>
               </div>
             </div>
@@ -1778,65 +1813,13 @@ function App() {
             />
           )}
 
-          {/* View: Settings */}
+          {/* View: Settings — provider chain, editable prompts, agent/MCP. */}
           {activeTab === 'settings' && (
-            /* The scroller is full width; the reading column inside it is what
-               is capped. A capped scroller puts its scrollbar in the middle of
-               the screen instead of at the window edge. */
-            <div className="h-full w-full overflow-y-auto overscroll-contain animate-fade">
-              <div className="w-full p-3 sm:p-6">
-              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
-                <div>
-                  <p className="eyebrow mb-1.5">08 · SETTINGS</p>
-                  <h1 className="font-display lowercase text-2xl text-ink">Settings</h1>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-muted mt-1">
-                  <Shield size={12} className="text-ok shrink-0" /> Privacy: keys only live in your browser (sent to backend just to process)
-                </div>
-              </div>
-              {/* Self-hosted installs have no account page, so the agent
-                  how-to lives here; cloud users get it (with OAuth) in Account. */}
-              {!billingEnabled && <div className="mb-6"><McpConnectCard cloud={false} /></div>}
-              {isManaged ? (
-                <div className="card p-6 mb-2">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                        <Shield size={16} className="text-brass" />
-                      </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Included in your plan</h2>
-                    </div>
-                    <span className="badge-ok">Managed</span>
-                  </div>
-                  <p className="text-xs text-muted mb-5 leading-relaxed">
-                    Your plan includes the <strong>Clip Generator</strong> and <strong>YouTube Studio</strong>,
-                    fully managed — no API keys required. Clips are downloaded and uploaded by hand
-                    on this local build.
-                  </p>
-                </div>
-              ) : billingEnabled ? (
-                <div className="card p-6 mb-2">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
-                        <Sparkles size={16} className="text-brass" />
-                      </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Choose your plan</h2>
-                    </div>
-                    <span className="badge-ok">Free plan available</span>
-                  </div>
-                  <p className="text-xs text-muted mb-5 leading-relaxed">
-                    Generate shorts with zero setup — no API keys needed. Start free with 20 min/month, or go paid from $12/mo. Cancel anytime.
-                  </p>
-                  <button onClick={() => setShowPlanChoice(true)} className="btn-primary py-2 px-4 text-sm">
-                    <Sparkles size={16} /> Choose a plan
-                  </button>
-                </div>
-              ) : (
-                <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
-              )}
-              </div>
-            </div>
+            <SettingsPage
+              billingEnabled={billingEnabled}
+              isManaged={isManaged}
+              onChoosePlan={() => setShowPlanChoice(true)}
+            />
           )}
 
           {/* View: AI Agent — the real control surface of this install: the
@@ -1848,7 +1831,7 @@ function App() {
 
                 <div className="space-y-3">
                   <p className="eyebrow flex items-center gap-2">
-                    <Bot size={12} /> 03 · AI AGENT
+                    <Bot size={12} /> 06 · AI AGENT
                   </p>
                   <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
                     Your agent drives the pipeline
@@ -1923,6 +1906,7 @@ function App() {
           {activeTab === 'thumbnails' && (
             <ThumbnailStudio
               geminiApiKey={apiKey}
+              geminiConfigured={geminiConfigured}
               uploadPostKey={uploadPostKey}
               uploadUserId={uploadUserId}
               managed={isManaged}
@@ -1940,6 +1924,23 @@ function App() {
             <Collector
               onProcessItem={processCollectorItem}
               onProcessQueue={processCollectorQueue}
+            />
+          )}
+
+          {/* View: Playground — caption/output styles before a render */}
+          {activeTab === 'playground' && (
+            <Playground
+              initialProfile={playgroundProfile}
+              onOpenProfiles={() => goToTab('profiles')}
+            />
+          )}
+
+          {/* View: Style Profiles — saved looks for the Clip Generator */}
+          {activeTab === 'profiles' && (
+            <StyleProfiles
+              onUse={useStyleProfile}
+              onEdit={editStyleProfile}
+              onCreate={newStyleProfile}
             />
           )}
 
@@ -1991,6 +1992,8 @@ function App() {
                   isProcessing={status === 'processing' || !!batch?.running}
                   initialCollector={collectorPrefill}
                   onInitialCollectorUsed={() => setCollectorPrefill(null)}
+                  initialProfile={profilePrefill}
+                  onInitialProfileUsed={() => setProfilePrefill(null)}
                 />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
@@ -2355,100 +2358,6 @@ function App() {
         <MobileTabBar />
 
       </main>
-
-      {/* Missing API Key Modal */}
-      <Modal
-        isOpen={showKeyModal}
-        onClose={() => setShowKeyModal(false)}
-        eyebrow="SETUP"
-        title={!geminiOk && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !geminiOk
-            ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
-        footer={
-          <div className="flex gap-3">
-            <button
-              onClick={() => setShowKeyModal(false)}
-              className="btn-ghost flex-1 px-4 py-2 text-sm"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => { setShowKeyModal(false); goToTab('settings'); }}
-              className="btn-primary flex-1 px-4 py-2 text-sm"
-            >
-              Go to Settings
-            </button>
-          </div>
-        }
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-muted">
-            Clip Studio needs a <strong className="text-ink2">Gemini</strong> API key for the AI
-            moment picker. The keyless agent flow does not need one.
-          </p>
-
-          {/* Gemini block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
-            <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
-            </p>
-            {!apiKey && (
-              <>
-                <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">aistudio.google.com/app/apikey</a></li>
-                  <li>Sign in with your Google account</li>
-                  <li>Click "Create API Key"</li>
-                  <li>Copy the key and paste it below</li>
-                </ol>
-                <input
-                  type="text"
-                  placeholder="Paste your Gemini API key here..."
-                  className="input-field"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && e.target.value.trim()) {
-                      setApiKey(e.target.value.trim());
-                    }
-                  }}
-                />
-              </>
-            )}
-          </div>
-
-          {/* Upload-Post block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
-            <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
-            </p>
-            {!uploadPostKey && (
-              <>
-                <p className="text-xs text-muted">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts. Free tier available, no credit card needed.
-                </p>
-                <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Register at <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="text-brass underline">app.upload-post.com</a></li>
-                  <li>Connect your TikTok, Instagram, or YouTube accounts</li>
-                  <li>Go to <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">API Keys</a> and generate one</li>
-                  <li>Paste it below</li>
-                </ol>
-                <input
-                  type="text"
-                  placeholder="Paste your Upload-Post API key here..."
-                  className="input-field"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && e.target.value.trim()) {
-                      setUploadPostKey(e.target.value.trim());
-                    }
-                  }}
-                />
-              </>
-            )}
-          </div>
-        </div>
-      </Modal>
 
       <ScheduleWeekModal
         isOpen={showScheduleWeek}

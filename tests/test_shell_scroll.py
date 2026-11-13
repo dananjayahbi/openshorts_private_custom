@@ -39,20 +39,21 @@ def test_gallery_is_not_wrapped_in_a_second_scroller():
 
 
 def test_settings_scroller_is_full_width():
-    app = _read("App.jsx")
-    scroller = [line for line in app.splitlines()
+    page = _read("components/SettingsPage.jsx")
+    scroller = [line for line in page.splitlines()
                 if "w-full overflow-y-auto overscroll-contain" in line]
     assert scroller, "Settings' scroll container must span the window"
     # The reading column inside is full width too: pages are not letterboxed.
-    assert 'className="w-full p-3 sm:p-6"' in app
-    assert "max-w-2xl mx-auto p-4" not in app
+    assert 'className="w-full p-3 sm:p-6"' in page
+    assert "max-w-2xl mx-auto p-4" not in page
 
 
 def test_every_page_pane_contains_its_overscroll():
     """Chained scrolling is what makes an inner pane feel like a broken page."""
     for name in ("components/Gallery.jsx", "components/HomeDashboard.jsx",
                  "components/Collector.jsx", "components/ThumbnailStudio.jsx",
-                 "components/BatchQueue.jsx"):
+                 "components/BatchQueue.jsx", "components/Playground.jsx",
+                 "components/StyleProfiles.jsx", "components/SettingsPage.jsx"):
         assert "overscroll-contain" in _read(name), name
 
 

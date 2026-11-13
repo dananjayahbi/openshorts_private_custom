@@ -79,11 +79,11 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId, managed = false, onCreateClips = null }) {
+export default function ThumbnailStudio({ geminiApiKey, geminiConfigured = false, uploadPostKey, uploadUserId, managed = false, onCreateClips = null }) {
   // Managed (hosted plan): Gemini runs server-side via the bearer token, no BYOK key.
   // Only send X-Gemini-Key for self-host BYOK. apiFetch attaches the bearer token.
   const keyHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
-  const needsKey = !geminiApiKey && !managed;
+  const needsKey = !geminiApiKey && !managed && !geminiConfigured;
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -480,7 +480,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
         {/* Header */}
         <div className="flex items-end justify-between mb-2">
           <div>
-            <p className="eyebrow mb-2">06 · YOUTUBE STUDIO</p>
+            <p className="eyebrow mb-2">07 · YOUTUBE STUDIO</p>
             <h1 className="font-display lowercase text-2xl text-ink flex items-center gap-3">
               <span className="w-10 h-10 rounded-card bg-paper3 flex items-center justify-center">
                 <Image size={18} className="text-brass" />
@@ -505,8 +505,8 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
           <div className="mb-6 p-5 bg-warn/10 rounded-card flex items-start gap-3">
             <AlertCircle size={18} className="text-warn shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-warn lowercase">Gemini API Key Required</p>
-              <p className="text-xs text-muted mt-1">YouTube Studio requires a Google Gemini API key to function. Please configure it in the <strong>Settings</strong> tab before using this feature. Gemini's free tier includes 1,500 requests per day.</p>
+              <p className="text-sm font-medium text-warn lowercase">Gemini level needed</p>
+              <p className="text-xs text-muted mt-1">YouTube Studio&apos;s titles and thumbnails use Gemini. Add a Gemini key to a level in the <strong>Settings</strong> provider chain (or set GEMINI_API_KEY). The clip pipeline runs on any provider in the chain.</p>
             </div>
           </div>
         )}

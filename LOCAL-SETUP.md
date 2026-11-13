@@ -138,10 +138,55 @@ protocol name stays `openshorts` (client configs and tooling use it); only the
 displayed title is Clip Studio. `LICENSE` / `NOTICE` keep the upstream MIT
 attribution.
 
+## Playground, Style Profiles, and captions before the render
+
+The caption look used to be editable only AFTER a clip was rendered. It is now
+chosen before the job starts:
+
+- **Clip Generator** → under the output format: a **style profile** selector and
+  a **burn captions** toggle. Advanced options holds the full caption editor
+  (presets, font, size, colour, highlight, border, background box, position,
+  uppercase, reveal, dim, shadow, animation, max chars/block) with a live
+  preview. The look is sent as `caption_style` on `/api/process`.
+- **Playground** (`04`) — the same controls on a bigger stage, over a real clip
+  from the library (or a neutral stage), with sample text, output format and
+  hook style. Save the combination as a profile.
+- **Style Profiles** (`05`) — the saved bundles. **use** applies one to the Clip
+  Generator (every control stays editable); **edit** reopens it in the
+  Playground; **delete** removes it. Cards render the saved look.
+
+A profile is:
+
+```json
+{ "name": "Gaming vertical",
+  "caption": { "style": "karaoke", "font_name": "Impact", "font_size": 56, ... },
+  "output":  { "output_format": "vertical", "layouts": ["auto"], "auto_hook": true,
+               "auto_hook_style": "pill", "target_clips": 5 },
+  "prompts": { "detail": "…optional override…" } }
+```
+
+Stored in `Storage/style_profiles.json`; managed through
+`GET/POST/PATCH/DELETE /api/style-profiles`. `/api/process` also accepts
+`style_profile_id` (an agent can name a profile instead of repeating fields);
+explicit request fields win over the profile, so the dashboard can apply one and
+still let the user tweak a control.
+
+Pipeline side: `/api/process` validates the look (`caption_style.py`) and sets
+`AUTO_CAPTION_STYLE_JSON`; `main.auto_caption_clip` merges it over
+`subtitles.AUTO_CAPTION_STYLE`, derives `max_chars` from the chosen font/size
+when not supplied, and burns it. The effective look is written to each clip's
+metadata (`caption_style`), so a later hook/edit/recut re-burns the same look
+instead of silently reverting to the default. Verified end to end: a job with
+`position=top, font=Impact, highlight=#00FF88, bg_opacity=0.35, shadow=2`
+produced an ASS with `Alignment 8`, `Impact 47`, `&H0088FF00` and the shadow
+colour, and the clip shipped with it.
+
 ## Settings — only what this build uses
 
-The Settings page keeps the Gemini key (optional: the keyless agent flow works
-without it) and the MCP how-to. The hosted product's sections were removed:
+The Settings page keeps the AI provider chain, the editable prompts and the MCP
+how-to. There is no separate Gemini key card any more: a key belongs to a level
+in the chain, and the chain is what every job uses. The hosted product's
+sections were removed:
 
 - **Social Integration (Upload-Post)**: clips and thumbnails are downloaded and
   uploaded by hand here. The per-clip `post` button and the Studio publish panel
@@ -246,47 +291,67 @@ engine to run them against; a reinstall would need a full image rebuild.
 | C: free after uninstalling Docker | **71.7 GB** |
 
 
-## AI prompts — what is hard-coded where
+## AI providers — the fallback chain
 
-There is no user-editable system prompt in the app. Every AI call sends a
-hard-coded instruction block defined as a module constant, with the transcript
-or candidate windows formatted into it. To change behaviour you edit the
-constant; nothing in Settings rewrites prompts.
+The moment picker no longer assumes a vendor. Settings → **AI providers** has
+five slots, tried in order; if a slot fails (dead endpoint, quota, a malformed
+answer) the next one is tried in the same call. Not every slot has to be filled.
 
-| Constant / file | Purpose |
+| Piece | Where |
 |---|---|
-| `gemini_worker.SCORE_PROMPT_TEMPLATE` | Active moment picker, pass 1: scores every candidate window 0-100 ("2-second test") |
-| `gemini_worker.DETAIL_PROMPT_TEMPLATE` | Pass 2: picks the final clips, writes hook, title, TikTok/IG captions, why |
-| `gemini_worker.LAYOUT_CHOICE_PROMPT` | Chooses split / screencast / single-crop layout per scene |
-| `gemini_worker.SHOT_CONTENT_PROMPT` | Describes what is on screen (screencast detection) |
-| `gemini_worker.GROUNDED_HOOK_PROMPT` | Checks hook text against frames (`hook_grounding.py`) |
-| `gemini_worker.VISUAL_PROMPT_TEMPLATE` | Silent/no-speech videos: picks moments from frames |
-| `editor.Editor.get_ffmpeg_filter` | Clip editor: effect decision list (applied by the deterministic FFmpeg renderer) |
-| `editor.Editor.get_effects_config` | Clip editor: zoom/brightness/contrast segments for the Remotion renderer |
-| `editor.Editor._repair_filter` | One self-repair round-trip when a generated FFmpeg filter fails |
-| `thumbnail.py` (5 prompts) | YouTube Studio: titles, title critic, refinement, thumbnail concepts, description |
-| `burned_subtitles.PROMPT` | Reads subtitles already burned into the source |
-| `free_tools.PROMPTS` | Free-tool generators (`/api/tools/*`: hashtags, captions, etc.; no nav page) |
-| `saasshorts.py` (3 prompts) | AI UGC videos; feature not exposed in this build |
-| `main.GEMINI_PROMPT_TEMPLATE` | Legacy whole-transcript selector; no longer referenced by the pipeline |
+| Chain (keys included) | `Storage/settings.json` → `llm.levels` |
+| Providers | OpenAI-compatible (`base_url` + `/chat/completions`) and native Gemini |
+| OpenAI-compatible covers | OpenAI, OpenRouter, Groq, DeepSeek, Ollama, LM Studio, vLLM, llama.cpp, LocalAI |
+| Test button | `POST /api/settings/llm/test` — one tiny JSON round-trip |
+| Who uses it | every text stage: the two moment-picker passes, the silent-video stills fallback, layout/on-screen checks, burned-in subtitle detection, hook grounding |
+| Legacy fallback | with no saved chain, `LLM_BASE_URL` / `GEMINI_API_KEY` from the environment still work |
 
-How they run:
+The chain lives server-side so an MCP/agent job and the batch queue use the same
+providers as a dashboard submission. `GET /api/config` exposes only booleans
+(`llmConfigured`) and the level summary — never the keys.
 
-- **Gemini** is the default (`GEMINI_API_KEY`, or a server-side key from the
-  environment). The model name is `GEMINI_MODEL` / the callers' default.
-- **Any OpenAI-compatible server** can take over the text moment picker
-  (`llm_backend.py`): set `LLM_PROVIDER=openai` (or leave it unset) and
-  `LLM_BASE_URL` (Ollama, LM Studio, vLLM, llama.cpp, LocalAI, OpenRouter),
-  optional `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT`. The same prompt constants
-  are sent; frame/video prompts (layout, on-screen content, silent videos)
-  still need Gemini.
-- **Clip count and length knobs** are not prompt text: `CLIP_TARGET_MIN/MAX`,
-  `CLIP_MIN_SECONDS` and `CLIP_MAX_SECONDS` (or the dashboard's advanced
-  options / `target_clips`, `clip_min_seconds`, `clip_max_seconds` form fields)
-  are formatted into the detail prompt.
-- **Agents** get no system prompt from this app. The MCP server exposes
-  `prepare_transcript` / `get_transcript` / `render_plan`, so the agent's own
-  system prompt decides which moments to cut.
+Frame-based stages send JPEG stills through the same chain: Gemini as parts,
+OpenAI-compatible providers as `image_url` data URLs. A level whose model cannot
+see images fails that call and the next level gets a turn; no stage is locked to
+Gemini.
+
+## AI prompts — editable, seeded with the current text
+
+Settings → **Prompts** lists the instruction blocks with their live text, the
+placeholders each one receives, and where it is used. Saving an edit stores an
+override in `Storage/settings.json`; **reset to default** removes it. Saving is
+refused when a required placeholder is missing, so an edit cannot break the
+next job.
+
+| Prompt id | Default constant | Used by |
+|---|---|---|
+| `score` | `gemini_worker.SCORE_PROMPT_TEMPLATE` | moment picker pass 1 (0-100, "2-second test") |
+| `detail` | `gemini_worker.DETAIL_PROMPT_TEMPLATE` | pass 2: final cuts, hook, title, captions |
+| `visual` | `gemini_worker.VISUAL_PROMPT_TEMPLATE` | silent videos (Gemini video or stills) |
+| `layout` | `gemini_worker.LAYOUT_CHOICE_PROMPT` | reframe choice (none / screencast / split) |
+| `screen_content` | `gemini_worker.SHOT_CONTENT_PROMPT` | screen / beside / camera per shot |
+| `hook_grounding` | `gemini_worker.GROUNDED_HOOK_PROMPT` | hook/title rewritten from frames |
+| `burned_subtitles` | `burned_subtitles.PROMPT` | detect subtitles already in the source |
+
+Three layers, highest wins: a Style Profile's own prompts (`PROMPT_OVERRIDES_JSON`
+for that job) → the Settings override → the module constant. Edit at runtime
+through `GET/PUT /api/settings/prompts` and `POST /api/settings/prompts/reset`.
+
+Still code-level (not in the editor): the clip editor's effect prompts
+(`editor.py`), YouTube Studio's five prompts (`thumbnail.py`), the free-tool
+generators (`free_tools.py`) and AI UGC (`saasshorts.py`, not exposed here).
+YouTube Studio's text/image generation still calls Gemini, so it needs a Gemini
+level in the chain (or `GEMINI_API_KEY`); the clip pipeline does not.
+`main.GEMINI_PROMPT_TEMPLATE` is legacy and unreferenced.
+
+Other knobs that are not prompt text:
+
+- **Clip count and length**: `CLIP_TARGET_MIN/MAX`, `CLIP_MIN_SECONDS`,
+  `CLIP_MAX_SECONDS` (or the dashboard's advanced options / the matching form
+  fields) are formatted into `detail`.
+- **Agents** get no system prompt from this app; through MCP the agent's own
+  prompt decides the cuts.
+
 
 ## MCP - full agent control
 

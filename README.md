@@ -15,15 +15,18 @@ Docker.
 | Page | What it does |
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip |
-| Clip Generator | Upload, link, or pick from the Collector; single video or bulk queue |
+| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or bulk queue |
 | Clip Gallery | Every rendered clip; mark used, archive, restore, download |
 | Collector | Shelf of links and files; download later, queue, process |
+| Playground | Try caption looks and output shapes on a real clip, save the result as a profile |
+| Style Profiles | Saved caption/format bundles; apply one in the Clip Generator |
 | AI Agent | MCP connection snippets (Claude, ChatGPT, Cursor, n8n) |
 | YouTube Studio | Titles, descriptions and thumbnails for the clips |
-| Settings | Optional Gemini key and the MCP how-to |
+| Settings | Five-level AI provider chain (any OpenAI-compatible endpoint or Gemini), editable prompts, MCP how-to |
 
 Everything lives under `Storage/` (videos, thumbnails, uploads, collector) and
-is served by the API as a local CDN.
+is served by the API as a local CDN. `Storage/settings.json` holds the provider
+chain and prompt overrides; `Storage/style_profiles.json` the saved looks.
 
 ## Run it
 

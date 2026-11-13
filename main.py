@@ -30,6 +30,7 @@ import hook_grounding
 import layout_picker
 import llm_backend
 import platform_compat
+import prompt_store
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, dedupe_overlapping,
@@ -1267,6 +1268,55 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True
 
 
+def caption_style_from_env():
+    """The caption look this job burns, keyed like ``CAPTION_STYLE_FIELDS``.
+
+    The defaults are the shipped ``subtitles.AUTO_CAPTION_STYLE``; a job started
+    with a pre-generation style (Clip Generator panel / Playground profile) gets
+    ``AUTO_CAPTION_STYLE_JSON`` merged over them. The result is also what main
+    records on each clip, so a later hook/edit/recut re-burns the same look.
+    """
+    import subtitles as _subs_style
+
+    base = _subs_style.AUTO_CAPTION_STYLE
+    style = {
+        "style": base.get("style", "karaoke"),
+        "position": base.get("alignment", "bottom"),
+        "font_size": base.get("font_size", 44),
+        "font_name": base.get("font_name", "Anton"),
+        "font_color": base.get("font_color", "#FFFFFF"),
+        "border_color": base.get("border_color", "#000000"),
+        "border_width": base.get("border_width", 4),
+        "bg_color": base.get("bg_color", "#000000"),
+        "bg_opacity": base.get("bg_opacity", 0.0),
+        "highlight_color": base.get("highlight_color", "#FFE500"),
+        "effect": base.get("effect", "pop"),
+        "base_opacity": base.get("base_opacity", 1.0),
+        "uppercase": base.get("uppercase", True),
+        "reveal": base.get("reveal", False),
+        "shadow": base.get("shadow", 0),
+        "max_chars": base.get("max_chars"),
+        "max_duration": base.get("max_duration", 1.4),
+    }
+    raw = os.environ.get("AUTO_CAPTION_STYLE_JSON")
+    override = {}
+    if raw:
+        try:
+            override = json.loads(raw)
+        except ValueError:
+            override = {}
+        if isinstance(override, dict):
+            for key in style:
+                if key in override and override[key] is not None:
+                    style[key] = override[key]
+    # A look that changes font/size but not max_chars must still fit the line:
+    # the shipped 16 belongs to Anton@44, not to Montserrat@70.
+    if not style.get("max_chars") or (raw and "max_chars" not in override):
+        style["max_chars"] = _subs_style.line_budget(
+            style["font_name"], style["font_size"])
+    return style
+
+
 def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=None,
                       plan_only=False, mark=False):
     """Burn the default caption style onto a finished clip.
@@ -1301,7 +1351,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
         return None  # silent video: nothing to caption
     try:
         import subtitles as _subs
-        style = _subs.AUTO_CAPTION_STYLE
+        style = caption_style_from_env()
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
         generation_id = int(time.time())
@@ -1338,17 +1388,20 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
                 transcript, clip_start, clip_end, ass_path,
                 split_ranges=split_ranges,
                 max_chars=style["max_chars"], max_duration=style["max_duration"],
-                alignment=style["alignment"], fontsize=style["font_size"],
+                alignment=style["position"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"],
-                highlight_color=style["highlight_color"], effect=style["effect"],
-                base_opacity=style["base_opacity"], uppercase=style["uppercase"]):
+                highlight_color=style["highlight_color"],
+                bg_color=style["bg_color"], bg_opacity=style["bg_opacity"],
+                effect=style["effect"], base_opacity=style["base_opacity"],
+                uppercase=style["uppercase"], reveal=style["reveal"],
+                shadow=style["shadow"]):
             print("   ℹ️ No words in range — clip ships without captions.")
             return None
 
         if plan_only:
             vf = _subs.subtitles_filter(
-                ass_path, alignment=style["alignment"], fontsize=style["font_size"],
+                ass_path, alignment=style["position"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"])
             return vf, generation_id
@@ -1360,9 +1413,10 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
         try:
             _subs.burn_subtitles(
                 clip_path, ass_path, out_path,
-                alignment=style["alignment"], fontsize=style["font_size"],
+                alignment=style["position"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"],
+                bg_color=style["bg_color"], bg_opacity=style["bg_opacity"],
                 mark=marked)
         except Exception:
             if marked and os.path.exists(marked[2]):
@@ -1973,37 +2027,16 @@ def _run_gemini_stage(client, model_name, prompt, schema):
     """One schema-enforced model call with transient-error backoff.
     Returns (parsed_dict, cost_analysis).
 
-    With an OpenAI-compatible server configured (``llm_backend.active()``)
-    the call goes there instead of Gemini and ``client`` is unused; the
-    retry policy is shared because a local server has the same failure
-    shapes (connection refused while the model loads, a truncated body,
-    a 5xx from a busy vLLM)."""
-    use_local = llm_backend.active()
-    config = None if use_local else genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
+    The provider chain (Settings → AI providers) is walked inside
+    ``llm_backend.generate_json``; ``client``/``model_name`` are kept for the
+    call sites but no client is used any more. The three attempts here cover
+    transient failures (a model still loading, a 5xx from a busy server, a
+    truncated body); every attempt re-walks the whole chain, so a dead level 1
+    never costs a retry."""
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            if use_local:
-                return llm_backend.generate_json(prompt, schema, model=model_name)
-            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
+            return llm_backend.generate_json(prompt, schema)
         except gemini_worker.GeminiBlockedError:
             raise  # deterministic policy block — never retry
         except Exception as e:
@@ -2020,8 +2053,8 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
-            who = "LLM server" if use_local else "Gemini"
-            print(f"⚠️ {who} transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
+            print(f"⚠️ AI provider transient error (attempt {attempt}/{max_attempts}), "
+                  f"retrying in {wait}s: {msg[:150]}")
             time.sleep(wait)
 
 
@@ -2062,7 +2095,8 @@ def score_batch_size():
             return max(1, int(raw))
         except ValueError:
             pass
-    return 3 if llm_backend.active() else 8
+    primary = llm_backend.primary() or {}
+    return 3 if primary.get("provider") == "openai" else 8
 
 
 def load_agent_plan(path, transcript, video_duration):
@@ -2142,20 +2176,13 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
     that hold them, and the hottest windows are guaranteed a shortlist slot.
     """
     language = str(transcript_result.get('language') or 'unknown')
-    if llm_backend.active():
-        # Self-hosted text model: no Google key needed for this stage.
-        client = None
-        model_name = llm_backend.model_name()
-        print(f"\U0001f916  Analyzing with local LLM at {llm_backend.base_url()} (2-pass: score → detail)...")
-    else:
-        print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            print("❌ Error: GEMINI_API_KEY not found in environment variables "
-                  "(set it, or point LLM_BASE_URL at an OpenAI-compatible server).")
-            return None
-        client = genai.Client(api_key=api_key)
-        model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    # The chain is resolved inside llm_backend per call; this is only for the
+    # log line and the cost summary. A Gemini level seeded with a key in
+    # Settings works the same as GEMINI_API_KEY used to.
+    model_name = llm_backend.primary_model_name() or "(no provider configured)"
+    client = None
+    print(f"\U0001f916  Analyzing with the configured AI chain "
+          f"(2-pass: score → detail; first provider: {model_name})...")
     print(f"\U0001f916  Model: {model_name} | language: {language}")
 
     # Full word list — ground truth for snapping cut points.
@@ -2205,8 +2232,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             return out
 
         def _score_prompt(ws):
-            return gemini_worker.SCORE_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
+            return prompt_store.render(
+                "score", video_duration=video_duration, language=language,
                 windows_json=json.dumps(_payload(ws), ensure_ascii=False))
 
         for batch in score_batches(windows, SCORE_BATCH):
@@ -2237,8 +2264,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             # A split batch keeps the full clip-count band: a short list can
             # still hold the best clips, and the model returns fewer anyway.
             def build(ws):
-                return gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
-                    video_duration=video_duration, language=language,
+                return prompt_store.render(
+                    "detail", video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
                     windows_json=json.dumps(_payload(ws), ensure_ascii=False))
@@ -2404,11 +2431,53 @@ def _viewer_hint(viewer_clips, offset, duration):
             "but still judge what you see and keep the time contract.\n")
 
 
+def _visual_pass_stills(model_name, video_path, duration, language,
+                        min_clips, max_clips, min_secs, max_secs, hint=""):
+    """Vision call over evenly sampled stills.
+
+    The Gemini path uploads the proxy and lets the model watch it. Providers
+    without a file API (OpenAI-compatible endpoints) get the same question as
+    stills with their timestamps spelled out, so a silent video is not tied to
+    one vendor. Returns ``(shorts, None)`` or ``(None, None)``.
+    """
+    import layout_picker
+
+    try:
+        n = max(6, min(24, int(duration // 4) + 1))
+        frames = layout_picker.sample_frames(video_path, n=n, width=768)
+        if not frames:
+            return None, None
+        step = duration / max(1, len(frames) - 1)
+        times = [round(i * step, 1) for i in range(len(frames))]
+        sampled = ("\nThe stills are sampled at these absolute seconds: "
+                   + ", ".join(str(t) for t in times) + ".")
+        prompt = prompt_store.render(
+            "visual", video_duration=duration, language=language,
+            min_clips=min_clips, max_clips=max_clips,
+            min_secs=min_secs, max_secs=max_secs) + sampled + (hint or "")
+        parsed = llm_backend.generate_vision_json(
+            prompt, gemini_worker.VisualResponse, frames)
+        clean = []
+        for s in parsed.get("shorts") or []:
+            s["start"] = max(0.0, float(s.get("start", 0)))
+            s["end"] = min(float(duration), float(s.get("end", 0)))
+            if s["end"] - s["start"] >= 1.0:
+                clean.append(s)
+        return clean, None
+    except Exception as e:
+        print(f"   ⚠️ Stills vision pass failed ({type(e).__name__}: {e})")
+        return None, None
+
+
 def _visual_pass(client, model_name, video_path, duration, language,
                  min_clips, max_clips, min_secs, max_secs, hint=""):
     """One vision call over one file. Returns ``(shorts, cost)``; ``shorts``
     are clamped to ``[0, duration]`` of THAT file. Returns ``(None, None)``
     when Gemini could not take the file; raises GeminiBlockedError."""
+    if client is None:
+        return _visual_pass_stills(
+            model_name, video_path, duration, language,
+            min_clips, max_clips, min_secs, max_secs, hint)
     file_upload = None
     try:
         file_upload = gemini_worker.upload_media(client, video_path)
@@ -2426,8 +2495,8 @@ def _visual_pass(client, model_name, video_path, duration, language,
                 return None, None
             time.sleep(2)
 
-        prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
-            video_duration=duration, language=language,
+        prompt = prompt_store.render(
+            "visual", video_duration=duration, language=language,
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs) + (hint or "")
         config = genai_types.GenerateContentConfig(
@@ -2465,18 +2534,16 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     stretch (``vision_segments``), and the picks are merged, de-overlapped
     and cut to the best ``CLIP_TARGET_MAX`` by score: a silent multi-hour
     console capture used to fail at the model."""
-    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        if llm_backend.active():
-            print("❌ This video has no usable speech, so it has to be clipped by "
-                  "watching it, and that needs Gemini (a text-only LLM server "
-                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
-        else:
-            print("❌ Error: GEMINI_API_KEY not found.")
+    print("🎥  Silent video — analyzing with the configured vision provider (no transcript)...")
+    has_gemini = bool(llm_backend.gemini_key())
+    if not has_gemini and not llm_backend.vision_available():
+        print("❌ This video has no usable speech, so it has to be clipped by "
+              "watching it. Configure a vision-capable provider in Settings "
+              "(OpenAI/Gemini/OpenRouter etc.); a text-only level cannot see frames.")
         return None
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    client = genai.Client(api_key=llm_backend.gemini_key()) if has_gemini else None
+    model_name = (llm_backend.gemini_model() if has_gemini
+                  else llm_backend.primary_model_name())
 
     # The vision path has no scoring windows to derive a count from, so the
     # env targets (user request) apply directly over the classic 3-15.
@@ -2492,8 +2559,9 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     segments = vision_segments(video_duration, VISION_SEGMENT_SECONDS, VISION_MAX_SEGMENTS)
     try:
         covered = segments[-1][1]
+        mode = "watching" if client is not None else "sampling stills from"
         if len(segments) == 1:
-            print(f"🎥  Model: {model_name} | watching a 360p/1 fps proxy of "
+            print(f"🎥  Model: {model_name} | {mode} a 360p/1 fps proxy of "
                   f"{os.path.basename(video_path)}")
         else:
             print(f"🎥  Model: {model_name} | {len(segments)} stretches of "
@@ -2970,6 +3038,10 @@ if __name__ == '__main__':
                                 split_ranges=split_ranges,
                                 mark=os.environ.get("WATERMARK") == "1")
                         served = captioned or deliver_path
+                        if os.environ.get("AUTO_CAPTION_STYLE_JSON"):
+                            # Remember the pre-generation look so hook/edit/recut
+                            # put the SAME captions back, not the default.
+                            clip['caption_style'] = caption_style_from_env()
                         if os.environ.get("WATERMARK") == "1":
                             served = mark_delivery(served)
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
@@ -3032,7 +3104,8 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook)
             # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c for c in shorts):
+            if any('auto_hook' in c or 'hook_grounding' in c or 'caption_style' in c
+                   for c in shorts):
                 # Atomic: the dashboard is already reading this file for the
                 # clips announced above (CLIP_READY).
                 write_json_atomic(metadata_file, clips_data, indent=2)

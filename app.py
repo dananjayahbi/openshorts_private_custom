@@ -1,6 +1,10 @@
 import os
 import llm_backend
 import platform_compat
+import prompt_store
+import settings_store
+import caption_style as caption_style_mod
+import style_profiles
 import storage
 import collector
 import clip_state
@@ -204,7 +208,7 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     header = request.headers.get("X-Gemini-Key")
     if header:
         return header
-    return os.environ.get("GEMINI_API_KEY")
+    return os.environ.get("GEMINI_API_KEY") or llm_backend.gemini_key()
 
 
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
@@ -1709,11 +1713,7 @@ def _reapply_captions(job_id, clip_index, video_path):
 # look the user picked. They used to burn the default one, so adding a hook
 # silently swapped someone's small serif captions for big yellow Anton
 # (github issue #82).
-CAPTION_STYLE_FIELDS = (
-    "style", "position", "font_size", "font_name", "font_color",
-    "border_color", "border_width", "bg_color", "bg_opacity",
-    "highlight_color", "effect", "base_opacity", "uppercase", "reveal",
-    "shadow", "max_chars", "max_duration")
+CAPTION_STYLE_FIELDS = caption_style_mod.FIELDS
 
 
 def _words_transcript(words, language="en"):
@@ -5089,7 +5089,128 @@ async def get_config():
         # Self-host only: a server-side GEMINI_API_KEY in the environment means
         # the dashboard does not need one pasted into Settings. Boolean only.
         "geminiEnvKey": bool(os.environ.get("GEMINI_API_KEY")) and not BILLING_ENABLED,
+        # A chain saved in Settings can run with no browser key at all, so the
+        # dashboard's "keys missing" banner keys off this instead of guessing
+        # from the environment.
+        "llmConfigured": False if BILLING_ENABLED else llm_backend.configured(),
+        # YouTube Studio (and the clip editor) still need Gemini specifically:
+        # tell the dashboard when a chain level holds a key so it stops asking.
+        "geminiConfigured": False if BILLING_ENABLED else bool(llm_backend.gemini_key()),
     }
+
+
+@app.get("/api/settings/llm")
+async def get_llm_settings():
+    """The five provider slots, in fallback order (keys included: local install)."""
+    return {
+        "levels": llm_backend.levels_for_ui(),
+        "configured": llm_backend.configured(),
+        "providers": [
+            {"id": "openai", "label": "OpenAI-compatible",
+             "hint": "OpenAI, OpenRouter, Groq, DeepSeek, Ollama, LM Studio, vLLM, "
+                     "llama.cpp, LocalAI — anything with /chat/completions."},
+            {"id": "gemini", "label": "Google Gemini",
+             "hint": "Native Gemini. Optional; the chain never requires it."},
+        ],
+    }
+
+
+@app.put("/api/settings/llm")
+async def put_llm_settings(request: Request):
+    body = await request.json()
+    levels = body.get("levels") if isinstance(body, dict) else None
+    if not isinstance(levels, list):
+        raise HTTPException(status_code=400, detail="levels must be a list")
+    try:
+        saved = llm_backend.save_levels(levels)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"levels": saved, "configured": llm_backend.configured()}
+
+
+@app.post("/api/settings/llm/test")
+async def test_llm_level(request: Request):
+    body = await request.json()
+    level = body.get("level") if isinstance(body, dict) else body
+    if not isinstance(level, dict):
+        raise HTTPException(status_code=400, detail="level must be an object")
+    return await asyncio.to_thread(llm_backend.test_level, level)
+
+
+@app.get("/api/settings/prompts")
+async def get_prompt_settings():
+    return {
+        "prompts": prompt_store.all_prompts(),
+        "overridden": [p["id"] for p in prompt_store.all_prompts() if p["overridden"]],
+    }
+
+
+@app.put("/api/settings/prompts")
+async def put_prompt_settings(request: Request):
+    body = await request.json()
+    updates = body.get("prompts") if isinstance(body, dict) else None
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=400, detail="prompts must be an object")
+    try:
+        prompt_store.set_overrides(updates)
+    except prompt_store.PromptError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await get_prompt_settings()
+
+
+@app.post("/api/settings/prompts/reset")
+async def reset_prompt_settings(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ids = body.get("ids") if isinstance(body, dict) else None
+    if ids is not None and not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="ids must be a list or null")
+    try:
+        prompt_store.reset(ids)
+    except prompt_store.PromptError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await get_prompt_settings()
+
+
+@app.get("/api/style-profiles")
+async def get_style_profiles():
+    """Saved caption/format/prompt bundles for the Clip Generator."""
+    return {"profiles": style_profiles.list_profiles()}
+
+
+@app.post("/api/style-profiles")
+async def create_style_profile(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        profile = style_profiles.create(body)
+    except style_profiles.ProfileError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return profile
+
+
+@app.patch("/api/style-profiles/{profile_id}")
+async def update_style_profile(profile_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        return style_profiles.update(profile_id, body)
+    except style_profiles.ProfileError as e:
+        status = 404 if "not found" in str(e) else 400
+        raise HTTPException(status_code=status, detail=str(e))
+
+
+@app.delete("/api/style-profiles/{profile_id}")
+async def delete_style_profile(profile_id: str):
+    if not style_profiles.delete(profile_id):
+        raise HTTPException(status_code=404, detail="profile not found")
+    return {"deleted": profile_id}
 
 
 _overview_gpu_cache = {"at": 0.0, "gpu": None}
@@ -5652,12 +5773,14 @@ async def process_endpoint(
     transcribe_only: Optional[str] = Form(None),
     source_job_id: Optional[str] = Form(None),
     collector_id: Optional[str] = Form(None),
+    caption_style: Optional[str] = Form(None),
+    style_profile_id: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     # Agent flow: a supplied clip plan (or a transcription-only run) needs no
     # model at all - the caller is the moment picker. Everything else still
-    # requires a key or a local OpenAI-compatible server.
-    if (not api_key and not (llm_backend.active() and not BILLING_ENABLED)
+    # requires a configured provider chain (Settings) or a browser key.
+    if (not api_key and not (llm_backend.configured() and not BILLING_ENABLED)
             and not (clip_plan or transcribe_only)):
         # Self-host with an OpenAI-compatible server configured needs no
         # Google key for the core pipeline: the moment picker runs there and
@@ -5694,8 +5817,36 @@ async def process_endpoint(
         transcribe_only = body.get("transcribe_only")
         source_job_id = body.get("source_job_id")
         collector_id = body.get("collector_id")
+        caption_style = body.get("caption_style")
+        style_profile_id = body.get("style_profile_id")
 
-    # Normalize output format (auto = keep pipeline default).
+    # A Style Profile is a bundle: caption look + output shape + (optional)
+    # prompt overrides. Explicit request fields win, so the dashboard can apply
+    # a profile and still let the user tweak one control before submitting.
+    profile = None
+    if style_profile_id:
+        profile = style_profiles.get(style_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Style profile not found")
+        saved = profile.get("output") or {}
+        if output_format in (None, ""):
+            output_format = saved.get("output_format")
+        if not layouts:
+            layouts = saved.get("layouts")
+        if auto_hook in (None, ""):
+            auto_hook = "1" if saved.get("auto_hook") else None
+        if auto_hook_style in (None, ""):
+            auto_hook_style = saved.get("auto_hook_style")
+        if target_clips in (None, ""):
+            target_clips = saved.get("target_clips")
+        if clip_min_seconds in (None, ""):
+            clip_min_seconds = saved.get("clip_min_seconds")
+        if clip_max_seconds in (None, ""):
+            clip_max_seconds = saved.get("clip_max_seconds")
+
+    style_doc = caption_style_mod.clean(caption_style)
+    if not style_doc and profile:
+        style_doc = caption_style_mod.clean(profile.get("caption"))
     if output_format not in ("vertical", "horizontal", "square"):
         output_format = "auto"
 
@@ -5801,6 +5952,19 @@ async def process_endpoint(
     # still dies before it renders anything -- the server starts and every job
     # fails instead. setdefault, so an explicit PYTHONIOENCODING still wins.
     env.setdefault("PYTHONIOENCODING", "utf-8")
+
+    # Pre-generation caption look (Clip Generator panel / Playground profile).
+    # The pipeline merges it over subtitles.AUTO_CAPTION_STYLE before burning,
+    # and main stores the effective look on each clip so a later hook/edit/
+    # recut re-burns the same look instead of the default one.
+    if style_doc:
+        env["AUTO_CAPTION_STYLE_JSON"] = json.dumps(style_doc)
+        print(f"[captions] job={job_id} style={style_doc.get('style')} "
+              f"font={style_doc.get('font_name')} pos={style_doc.get('position')}")
+    if profile and profile.get("prompts"):
+        env["PROMPT_OVERRIDES_JSON"] = json.dumps(profile["prompts"])
+        print(f"[prompts] job={job_id} profile={profile['id']} "
+              f"overrides={sorted(profile['prompts'])}")
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK

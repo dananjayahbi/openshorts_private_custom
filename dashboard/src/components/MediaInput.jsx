@@ -5,6 +5,9 @@ import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
 import CollectorPicker from './CollectorPicker';
+import CaptionControls from './CaptionControls';
+import CaptionStage from './CaptionStage';
+import { DEFAULT_CAPTION_STYLE, presetToStyle } from '../lib/captionStyles';
 
 const SUPPORTED_PLATFORMS = [
     'YouTube', 'Vimeo', 'TikTok', 'X / Twitter', 'Twitch', 'Kick',
@@ -34,7 +37,7 @@ const readVideoDuration = (file) => new Promise((resolve) => {
 
 const fileKey = (f) => `${f.name}:${f.size}:${f.lastModified}`;
 
-export default function MediaInput({ onProcess, onProcessBatch, isProcessing, initialCollector, onInitialCollectorUsed }) {
+export default function MediaInput({ onProcess, onProcessBatch, isProcessing, initialCollector, onInitialCollectorUsed, initialProfile, onInitialProfileUsed }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     // File upload is the primary path; the link and the collector are next.
     const [mode, setMode] = useState('file'); // 'file' | 'url' | 'collector'
@@ -74,6 +77,22 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     });
     const [queuedCount, setQueuedCount] = useState(0);
     const [queueError, setQueueError] = useState('');
+    // Pre-generation caption look + the profile it came from. The look is
+    // sent to /api/process, so captions are styled before the render instead
+    // of only after it.
+    const [captionStyle, setCaptionStyle] = useState(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem('os_caption_style') || 'null');
+            return saved ? { ...DEFAULT_CAPTION_STYLE, ...saved } : presetToStyle(null);
+        } catch { return presetToStyle(null); }
+    });
+    const [captionsOn, setCaptionsOn] = useState(() => {
+        try { return localStorage.getItem('os_captions') !== '0'; } catch { return true; }
+    });
+    const [profiles, setProfiles] = useState([]);
+    const [styleProfileId, setStyleProfileId] = useState(() => {
+        try { return localStorage.getItem('os_style_profile') || ''; } catch { return ''; }
+    });
     const infoRef = useRef(null);
     const fileInput = useRef(null);
 
@@ -151,6 +170,42 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         onInitialCollectorUsed?.();
     }, [initialCollector, onInitialCollectorUsed]);
 
+    // A Style Profile's "use" hands its look/options to this page. Applied once
+    // per handover; every control stays editable afterwards.
+    const applyProfile = (profile) => {
+        if (!profile) return;
+        setStyleProfileId(profile.id);
+        setCaptionStyle({ ...DEFAULT_CAPTION_STYLE, ...(profile.caption || {}) });
+        const output = profile.output || {};
+        if (output.output_format) setOutputFormat(output.output_format);
+        if (Array.isArray(output.layouts) && output.layouts.length) setLayout(output.layouts[0]);
+        if (typeof output.auto_hook === 'boolean') setAutoHook(output.auto_hook);
+        if (output.auto_hook_style) setAutoHookStyle(output.auto_hook_style);
+        if (output.target_clips) setTargetClips(String(output.target_clips));
+        if (output.clip_min_seconds) setClipMinSeconds(String(output.clip_min_seconds));
+        if (output.clip_max_seconds) setClipMaxSeconds(String(output.clip_max_seconds));
+    };
+
+    useEffect(() => {
+        apiFetch('/api/style-profiles')
+            .then((r) => (r.ok ? r.json() : { profiles: [] }))
+            .then((d) => setProfiles(d.profiles || []))
+            .catch(() => { /* profiles are optional */ });
+    }, []);
+
+    const appliedProfileRef = useRef(null);
+    useEffect(() => {
+        const incoming = initialProfile?.profile;
+        if (!incoming) {
+            appliedProfileRef.current = null;
+            return;
+        }
+        if (appliedProfileRef.current === incoming.id) return;
+        appliedProfileRef.current = incoming.id;
+        applyProfile(incoming);
+        onInitialProfileUsed?.();
+    }, [initialProfile, onInitialProfileUsed]);
+
     // A link pasted in the landing hero: preload it here so the user picks up
     // where they left off. Not auto-submitted — the rights attestation below
     // has to be ticked by the user.
@@ -187,6 +242,9 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         layout,
         sourceStart: range ? Math.round(range.start) : null,
         sourceEnd: range ? Math.round(range.end) : null,
+        captionStyle,
+        captions: captionsOn,
+        styleProfileId: styleProfileId || null,
     });
 
     const rememberOptions = () => {
@@ -194,6 +252,9 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
             localStorage.setItem('os_layout', layout);
+            localStorage.setItem('os_caption_style', JSON.stringify(captionStyle));
+            localStorage.setItem('os_captions', captionsOn ? '1' : '0');
+            localStorage.setItem('os_style_profile', styleProfileId || '');
         } catch { /* ignore */ }
     };
 
@@ -550,6 +611,42 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                     </div>
                 </div>
 
+                {/* Style profile + captions: visible without opening advanced,
+                    because the whole point is choosing the look BEFORE the
+                    render. A profile can still be tweaked below. */}
+                <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                    <label className="block">
+                        <span className="eyebrow">style profile</span>
+                        <select
+                            value={styleProfileId}
+                            onChange={(e) => {
+                                const id = e.target.value;
+                                if (!id) {
+                                    setStyleProfileId('');
+                                    return;
+                                }
+                                const profile = profiles.find((p) => p.id === id);
+                                if (profile) applyProfile(profile);
+                            }}
+                            className="input-field mt-1 text-sm"
+                        >
+                            <option value="">custom / shipped default</option>
+                            {profiles.map((p) => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                        </select>
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-ink2 sm:mt-5 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={captionsOn}
+                            onChange={(e) => setCaptionsOn(e.target.checked)}
+                            className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
+                        />
+                        burn captions into the clips
+                    </label>
+                </div>
+
                 {/* Advanced generation controls — collapsed by default; blank = AI decides */}
                 <div className="mt-4">
                     <button
@@ -644,6 +741,32 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                                     <p className="w-full text-[11px] leading-relaxed text-muted">
                                         You can change each clip&apos;s hook text, style, position and size
                                         afterwards with its hook button.
+                                    </p>
+                                )}
+                            </div>
+                            <div className="col-span-1 sm:col-span-3 pt-3 border-t border-rule space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-xs text-ink2">captions &amp; style</span>
+                                    <span className="text-[11px] text-muted">
+                                        the Playground has the same controls with a bigger preview
+                                    </span>
+                                </div>
+                                {captionsOn ? (
+                                    <div className="flex flex-col lg:flex-row gap-4">
+                                        <CaptionStage
+                                            style={captionStyle}
+                                            playing={false}
+                                            className="w-[140px] shrink-0 self-start rounded-input border border-rule"
+                                        />
+                                        <div className="flex-1 min-w-0">
+                                            <CaptionControls value={captionStyle} onChange={setCaptionStyle} />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <p className="text-[11px] leading-relaxed text-muted">
+                                        Captions are off for this job. The source may already carry
+                                        burned-in subtitles, or you can add them later from the clip’s
+                                        subtitle button.
                                     </p>
                                 )}
                             </div>

@@ -40,14 +40,18 @@ def _completion(payload, usage=None):
 def test_inactive_without_a_base_url(monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     assert llm_backend.active() is False
     assert llm_backend.describe() is None
 
 
 def test_base_url_alone_activates_and_describes(local):
     assert llm_backend.active() is True
-    assert llm_backend.describe() == {
-        "provider": "openai", "model": "qwen2.5:14b", "baseUrl": "http://llm.test/v1"}
+    described = llm_backend.describe()
+    assert described["provider"] == "openai"
+    assert described["model"] == "qwen2.5:14b"
+    assert described["baseUrl"] == "http://llm.test/v1"
+    assert described["levels"][0]["configured"] is True
 
 
 def test_explicit_gemini_provider_wins_over_base_url(local, monkeypatch):
