@@ -54,7 +54,6 @@ const TABS = [
     { id: 'library', label: 'Library', view: 'active', usage: 'any' },
     { id: 'used', label: 'Used', view: 'active', usage: 'used' },
     { id: 'unused', label: 'Unused', view: 'active', usage: 'unused' },
-    { id: 'archived', label: 'Archived', view: 'archived', usage: 'any' },
 ];
 
 const keyOf = (clip) => `${clip.job_id}:${clip.index}`;
@@ -92,7 +91,7 @@ const pageList = (page, pages) => {
     return out;
 };
 
-export default function Gallery() {
+export default function Gallery({ onOpenArchive }) {
     const [clips, setClips] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -106,6 +105,11 @@ export default function Gallery() {
     const [filters, setFilters] = useState(EMPTY_FILTERS);
     const [search, setSearch] = useState('');
     const [archiving, setArchiving] = useState(false);
+    // Staged archiving: clips posted on only one platform wait here until the
+    // user runs the matching button. Both-platform clips go automatically.
+    const [staged, setStaged] = useState({
+        enabled: false, days: 0, facebook: [], youtube: [],
+    });
     // Full-viewport player: cards are posters, this is the only place a clip
     // plays (and where its copy/platforms are edited).
     const [active, setActive] = useState(null);
@@ -121,6 +125,23 @@ export default function Gallery() {
     const scrollRef = useRef(null);
     const activeTab = TABS.find((t) => t.id === tab) || TABS[0];
     const filtersActive = filters.date !== 'any' || filters.platform !== 'any' || !!filters.q;
+
+    const fetchStaged = useCallback(async () => {
+        try {
+            const res = await fetch(getApiUrl('/api/gallery/archive-staged'));
+            if (!res.ok) return;
+            const data = await res.json();
+            setStaged({
+                enabled: !!data.enabled,
+                days: Number(data.days) || 0,
+                facebook: data.facebook || [],
+                youtube: data.youtube || [],
+            });
+        } catch (_) {
+            // The staging buttons are an extra: a failed refresh hides them
+            // rather than blocking the gallery.
+        }
+    }, []);
 
     const fetchClips = useCallback(async (targetPage = 1) => {
         // A half-filled custom range is still being edited; keep the last
@@ -160,12 +181,13 @@ export default function Gallery() {
             setPages(data.pages || 0);
             setTotal(data.total || 0);
             setError(null);
+            fetchStaged();
         } catch (err) {
             setError(err.message);
         } finally {
             setLoading(false);
         }
-    }, [activeTab.view, activeTab.usage, filters, pageSize]);
+    }, [activeTab.view, activeTab.usage, filters, pageSize, fetchStaged]);
 
     // Initial load, and a fresh first page whenever a tab/filter/page size
     // changes: staying on page 7 of a narrower result set would be confusing.
@@ -204,11 +226,14 @@ export default function Gallery() {
     const handleChanged = (clip, flags) => {
         const merged = { ...clip, ...flags };
         setActive((current) => (current && keyOf(current) === keyOf(clip) ? merged : current));
+        // Archiving moved the file into the Archive page: the player has
+        // nothing left to play, so close it instead of leaving a broken <video>.
+        if (flags?.archived) setActive(null);
         fetchClips(page);
     };
 
     const archiveAllUsed = async () => {
-        if (!window.confirm(`Archive all ${counts.used} clip(s) marked used? The files stay on disk; they move to the Archived tab.`)) return;
+        if (!window.confirm(`Archive all ${counts.used} clip(s) marked used? They move out of the gallery into the Archive page (and can be pushed to a vault from there).`)) return;
         setArchiving(true);
         setActionError('');
         try {
@@ -217,6 +242,73 @@ export default function Gallery() {
             await fetchClips(1);
         } catch (e) {
             setActionError(String(e.message || e).slice(0, 200));
+        } finally {
+            setArchiving(false);
+        }
+    };
+
+    const archiveSelected = async () => {
+        const targets = clips.filter((c) => selected.has(keyOf(c)));
+        if (!targets.length || archiving) return;
+        setArchiving(true);
+        setActionError('');
+        try {
+            const res = await fetch(getApiUrl('/api/archive/clips'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    clips: targets.map((c) => ({ job_id: c.job_id, index: c.index })),
+                }),
+            });
+            if (!res.ok) throw new Error(await readError(res));
+            const data = await res.json();
+            const failed = data.failed || [];
+            if (failed.length) {
+                setActionError(
+                    `${failed.length} clip(s) could not be archived — `
+                    + (failed[0].error || 'another program has the file open.'));
+            }
+            setSelected(new Set());
+            setSelectMode(false);
+            // Archiving moves the file out of /videos; a player still on it
+            // would only show a broken frame.
+            setActive((current) => (
+                current && targets.some((t) => keyOf(t) === keyOf(current)) ? null : current));
+            await fetchClips(page);
+        } catch (e) {
+            setActionError(String(e.message || e).slice(0, 240));
+        } finally {
+            setArchiving(false);
+        }
+    };
+
+    const archiveStagedGroup = async (platform) => {
+        const refs = staged[platform] || [];
+        if (!refs.length || archiving) return;
+        const label = platform === 'youtube' ? 'YouTube' : 'Facebook';
+        if (!window.confirm(
+            `Archive ${refs.length} clip(s) posted only on ${label}? `
+            + 'They move to the Archive page.',
+        )) return;
+        setArchiving(true);
+        setActionError('');
+        try {
+            const res = await fetch(getApiUrl('/api/gallery/archive-staged'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ platform }),
+            });
+            if (!res.ok) throw new Error(await readError(res));
+            const data = await res.json();
+            const failed = data.failed || [];
+            if (failed.length) {
+                setActionError(
+                    `${failed.length} clip(s) could not be archived — `
+                    + (failed[0].error || 'another program has the file open.'));
+            }
+            await fetchClips(page);
+        } catch (e) {
+            setActionError(String(e.message || e).slice(0, 240));
         } finally {
             setArchiving(false);
         }
@@ -350,8 +442,32 @@ export default function Gallery() {
                         <p className="eyebrow mb-1.5">Library</p>
                         <h1 className="font-display lowercase text-2xl text-ink">Clip Gallery</h1>
                     </div>
-                    <div className="flex items-center gap-2">
-                        {counts.used > 0 && tab !== 'archived' && !filtersActive && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {staged.youtube.length > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => archiveStagedGroup('youtube')}
+                                disabled={archiving}
+                                className="btn-quiet text-xs py-1.5 px-2.5 text-brass"
+                                title={`Posted only on YouTube — staged for your permission; clips posted on both auto-archive after ${staged.days} day(s)`}
+                            >
+                                {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                                archive yt-only ({staged.youtube.length})
+                            </button>
+                        )}
+                        {staged.facebook.length > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => archiveStagedGroup('facebook')}
+                                disabled={archiving}
+                                className="btn-quiet text-xs py-1.5 px-2.5 text-brass"
+                                title={`Posted only on Facebook — staged for your permission; clips posted on both auto-archive after ${staged.days} day(s)`}
+                            >
+                                {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                                archive fb-only ({staged.facebook.length})
+                            </button>
+                        )}
+                        {counts.used > 0 && !filtersActive && (
                             <button
                                 type="button"
                                 onClick={archiveAllUsed}
@@ -361,6 +477,19 @@ export default function Gallery() {
                             >
                                 {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
                                 archive used ({counts.used})
+                            </button>
+                        )}
+                        {onOpenArchive && (
+                            <button
+                                type="button"
+                                onClick={onOpenArchive}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                                title="Open the Archive page"
+                            >
+                                <Archive size={13} /> archive page
+                                {counts.archived > 0 && (
+                                    <span className="readout ml-1">{counts.archived}</span>
+                                )}
                             </button>
                         )}
                         <span className="readout tabular-nums">
@@ -529,6 +658,15 @@ export default function Gallery() {
                             <span className="readout">{selected.size} selected</span>
                             <button
                                 type="button"
+                                onClick={archiveSelected}
+                                disabled={!selected.size || archiving}
+                                className="btn-quiet text-xs py-1.5 px-2.5"
+                            >
+                                {archiving ? <Loader2 size={13} className="animate-spin" /> : <Archive size={13} />}
+                                archive ({selected.size})
+                            </button>
+                            <button
+                                type="button"
                                 onClick={() => requestDelete(selectedClips)}
                                 disabled={!selected.size || deleting}
                                 className="btn-quiet text-xs py-1.5 px-2.5 text-danger"
@@ -564,11 +702,6 @@ export default function Gallery() {
                                     reset filters
                                 </button>
                             </>
-                        ) : tab === 'archived' ? (
-                            <>
-                                <p className="text-lg mb-2 lowercase">Nothing archived.</p>
-                                <p className="text-sm lowercase">Archive clips you are done with; the files stay on disk.</p>
-                            </>
                         ) : (
                             <>
                                 <p className="text-lg mb-2 lowercase">No clips found yet.</p>
@@ -578,7 +711,7 @@ export default function Gallery() {
                     </div>
                 ) : (
                     <>
-                        <div className={`grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 gap-2.5 sm:gap-3 pb-4 transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                        <div className={`grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 gap-2.5 sm:gap-3 pb-4 items-start transition-opacity ${loading ? 'opacity-60' : ''}`}>
                             {clips.map((clip) => (
                                 <GalleryCard
                                     key={keyOf(clip)}

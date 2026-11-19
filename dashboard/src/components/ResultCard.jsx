@@ -12,6 +12,7 @@ import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import TikTokDraftNotice from './TikTokDraftNotice';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
+import { youtubeTitle, youtubeDescription, facebookTitle, clipTags } from '../lib/clipCopy';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2.5 sm:py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -299,8 +300,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // Initialize/Reset form when modal opens
     useEffect(() => {
         if (showModal) {
-            setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
-            setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setPostTitle(youtubeTitle(clip) || "Viral Short");
+            setPostDescription(youtubeDescription(clip) || "");
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
@@ -874,8 +875,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             {/* Right: Content & Details */}
             <div className="flex-1 p-4 md:p-5 flex flex-col overflow-hidden min-w-0">
                 <div className="mb-4">
-                    <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
-                        {clip.video_title_for_youtube_short || "Viral Clip Generated"}
+                    <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 mb-2 break-words" title={youtubeTitle(clip)}>
+                        {youtubeTitle(clip) || "Viral Clip Generated"}
                     </h3>
                     {/* The score alone says how much, not why. One line from
                         the selection pass on what this moment has going for it. */}
@@ -916,10 +917,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0 overflow-hidden">
                         <span className="eyebrow shrink-0">YOUTUBE</span>
                         <p className="text-xs text-ink2 truncate flex-1 min-w-0">
-                            {clip.video_title_for_youtube_short || "Viral Short Video"}
+                            {youtubeTitle(clip) || "Viral Short Video"}
                         </p>
                         <button
-                            onClick={() => handleCopy('youtube', clip.video_title_for_youtube_short || "Viral Short Video")}
+                            onClick={() => handleCopy('youtube', youtubeTitle(clip) || "Viral Short Video")}
                             aria-label="copy youtube title"
                             className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
                         >
@@ -928,16 +929,30 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </div>
 
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0 overflow-hidden">
-                        <span className="eyebrow shrink-0">TIKTOK · IG</span>
+                        <span className="eyebrow shrink-0">FACEBOOK</span>
                         <p className="text-xs text-ink2 truncate flex-1 min-w-0">
-                            {clip.video_description_for_tiktok || clip.video_description_for_instagram}
+                            {facebookTitle(clip)}
                         </p>
                         <button
-                            onClick={() => handleCopy('caption', clip.video_description_for_tiktok || clip.video_description_for_instagram)}
-                            aria-label="copy caption"
+                            onClick={() => handleCopy('facebook', facebookTitle(clip))}
+                            aria-label="copy facebook post"
                             className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
                         >
-                            {copied === 'caption' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+                            {copied === 'facebook' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+                        </button>
+                    </div>
+
+                    <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0 overflow-hidden">
+                        <span className="eyebrow shrink-0">YT DESC</span>
+                        <p className="text-xs text-ink2 truncate flex-1 min-w-0">
+                            {youtubeDescription(clip) || "—"}
+                        </p>
+                        <button
+                            onClick={() => handleCopy('youtube_desc', youtubeDescription(clip))}
+                            aria-label="copy youtube description"
+                            className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
+                        >
+                            {copied === 'youtube_desc' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
                         </button>
                     </div>
 
@@ -1055,9 +1070,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 <div className="space-y-4">
                     <div>
                         <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <label className="eyebrow">FACEBOOK POST</label>
+                            <button
+                                onClick={() => handleCopy('facebook', facebookTitle(clip))}
+                                aria-label="copy facebook post"
+                                className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
+                            >
+                                {copied === 'facebook' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+                            </button>
+                        </div>
+                        <p className="text-sm text-ink2 select-all break-words bg-paper rounded-input p-3 border border-rule whitespace-pre-wrap">
+                            {facebookTitle(clip)}
+                        </p>
+                    </div>
+
+                    <div>
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
                             <label className="eyebrow">YOUTUBE TITLE</label>
                             <button
-                                onClick={() => handleCopy('youtube', clip.video_title_for_youtube_short || "Viral Short Video")}
+                                onClick={() => handleCopy('youtube', youtubeTitle(clip) || "Viral Short Video")}
                                 aria-label="copy youtube title"
                                 className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
                             >
@@ -1065,23 +1096,39 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             </button>
                         </div>
                         <p className="text-sm text-ink2 select-all break-words bg-paper rounded-input p-3 border border-rule">
-                            {clip.video_title_for_youtube_short || "Viral Short Video"}
+                            {youtubeTitle(clip) || "Viral Short Video"}
                         </p>
                     </div>
 
                     <div>
                         <div className="flex items-center justify-between gap-2 mb-1.5">
-                            <label className="eyebrow">TIKTOK · IG CAPTION</label>
+                            <label className="eyebrow">YOUTUBE DESCRIPTION</label>
                             <button
-                                onClick={() => handleCopy('caption', clip.video_description_for_tiktok || clip.video_description_for_instagram)}
-                                aria-label="copy caption"
+                                onClick={() => handleCopy('youtube_desc', youtubeDescription(clip))}
+                                aria-label="copy youtube description"
                                 className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
                             >
-                                {copied === 'caption' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+                                {copied === 'youtube_desc' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
                             </button>
                         </div>
                         <p className="text-sm text-ink2 select-all break-words bg-paper rounded-input p-3 border border-rule whitespace-pre-wrap">
-                            {clip.video_description_for_tiktok || clip.video_description_for_instagram}
+                            {youtubeDescription(clip) || "—"}
+                        </p>
+                    </div>
+
+                    <div>
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <label className="eyebrow">YOUTUBE TAGS</label>
+                            <button
+                                onClick={() => handleCopy('tags', clipTags(clip))}
+                                aria-label="copy youtube tags"
+                                className="p-1 rounded-full text-muted hover:text-brass transition-colors shrink-0"
+                            >
+                                {copied === 'tags' ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
+                            </button>
+                        </div>
+                        <p className="text-sm text-ink2 select-all break-words bg-paper rounded-input p-3 border border-rule">
+                            {clipTags(clip) || "—"}
                         </p>
                     </div>
                 </div>

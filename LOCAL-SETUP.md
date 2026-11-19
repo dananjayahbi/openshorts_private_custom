@@ -47,6 +47,8 @@ Storage/
   videos/<job_id>/...        clips, sources, metadata   -> /videos/<job_id>/...
   thumbnails/<session_id>/...                           -> /thumbnails/...
   uploads/                   transient sources (not served)
+  downloads/<id>/...         Download Manager sources (not served)
+  archive/                   permanent clips + archive.db (not served, not swept)
 ```
 
 - `OUTPUT_DIR` is `Storage/videos`, `UPLOAD_DIR` is `Storage/uploads`,
@@ -90,12 +92,16 @@ sequentially with per-item progress (the clips land in the Clip Gallery as each
 job finishes). The queue button works from either the Collector page or the
 Clip Generator.
 
-The batch view keeps a **terminal per video**: every row polls that job's
-`/api/status` and shows the same log tail (with timestamps) as the single-job
-screen. A failed row shows the pipeline's own last line — an AI provider that
-returned nothing, a download error, a source with no audio — instead of a bare
-"job failed", and a **retry failed** button re-runs only the failed rows, so a
-transient error in video 2 does not repeat videos 1–4.
+The queue **uses the ordinary single-video screen**, one video at a time: the
+same processing view, log tail and clip cards as a manual run. When a video
+finishes its clips are already in the Clip Gallery; the screen says so and then
+shows **"Preparing the environment for the next video"**, clears the previous
+job and starts the next one automatically. A slim line above the workspace shows
+`done/total` and the current video with **stop queue**. A failed video shows the
+pipeline's own last line — an AI provider that returned nothing, a download
+error, a source with no audio — and the queue continues; **retry failed** re-runs
+only those videos, so a transient error in video 2 does not repeat videos 1–4.
+`new` while a queue runs stops it (clips already finished stay in the gallery).
 
 | Piece | Where |
 |---|---|
@@ -105,14 +111,94 @@ transient error in video 2 does not repeat videos 1–4.
 | API | `GET/POST /api/collector`, `POST /api/collector/upload`, `POST /api/collector/{id}/download`, `POST /api/collector/{id}/queue`, `DELETE /api/collector/{id}` |
 | Processing | `POST /api/process` accepts `collector_id`; a downloaded file is hardlinked into the job, so the collector keeps its copy |
 
+## Download Manager: full sources in temp, split into the Collector
+
+`/download-manager` (nav 04) fetches whole videos for editing elsewhere. Paste
+one link or several (one per line) and the server downloads them **one at a
+time** into `Storage/downloads/<id>/` — yt-dlp with the same public-address guard
+and provider chain as a job. The item shows its live byte progress (the temp
+file's size against the probed size), title, length and state.
+
+Each item has its **own part length** in minutes (default 20). 1.5 h at 20 min
+becomes five items on the Collector (four 20-minute parts and the 10-minute
+remainder). **split into parts** cuts one item; **start split queue** walks every
+ready item one by one, so a batch can mix 20-minute and 1-hour parts. The split
+uses ffmpeg's segment muxer with stream copy (fast; boundaries land on
+keyframes, so a part can be a second or two off the exact wall-clock length).
+Every part is handed to `collector.add_file` and appears on the shelf with a
+poster and duration, ready to clip.
+
+| Piece | Where |
+|---|---|
+| Index (not served) | `Storage/downloads/items.json` |
+| Sources (not served) | `Storage/downloads/<id>/` |
+| API | `GET/POST /api/downloads`, `PATCH /api/downloads/{id}`, `POST /api/downloads/{id}/split`, `POST /api/downloads/split-all`, `DELETE /api/downloads/{id}` |
+| Output | `POST /api/downloads/*` never touches the Collector until a split; then the parts are normal Collector items |
+| Cleanup | deleting a download removes its temp source only; the Collector parts stay |
+
+Downloads and splits are server-side threads, so navigating away does not stop
+them. A failed link becomes an error item (with the reason) instead of failing
+the batch; a failed split goes back to **ready to split** with the ffmpeg error.
+Deleting is refused while an item is queued, downloading or splitting.
+
+## Archive: permanent clips and external storage vaults
+
+`/archive` (nav **Archive**) is the permanent home for clips you are done with.
+Archiving moves the clip's video and poster out of `Storage/videos/<job_id>/`
+into `Storage/archive/files/<id>/` **before** the retention sweep can touch
+them, and records the clip in `Storage/archive/archive.db` (SQLite, stdlib).
+The gallery's "archive" button, "archive used (N)", and the optional
+auto-archive rule all feed this page; the old flag-only archive is migrated on
+the first start after upgrading.
+
+- **Filters** — search, archived date, vault, state (on this PC / in a vault /
+  queued delete / missing), posted platform, sort (newest, oldest, duration,
+  score, size) and page size. Every filter, sort and page is one indexed SQL
+  query, so thousands of clips stay cheap.
+- **Thumbnails stay local.** A vaulted clip keeps its poster, title, tags and
+  copy; only the video bytes live on the device.
+- **Auto-archive** — optional; clips posted on **both** platforms longer than N
+  days ago are archived on the next maintenance pass. One-platform clips are
+  staged behind the gallery's two buttons instead of moving on their own. The
+  page warns when the delay is longer than `JOB_RETENTION_SECONDS`, because the
+  sweep would remove them first.
+
+### Vaults
+
+A vault is one preallocated `<name>-<id8>.osvault` file on a chosen folder of a
+device (flash drive, external HDD/SSD, network mount). Creating it writes the
+whole file out so the space is really reserved; the rest of the device stays
+usable. A 1 MiB header holds the manifest (id, name, key, capacity, allocation
+pointer, free ranges); entries are `4 KiB header + payload`, block aligned.
+
+| Action | What happens |
+|---|---|
+| Add vault | Pick a device folder, name it and set its size in GB. A worker writes the file; the card shows progress. |
+| Scan | Every 10 s, and on **rescan**: mounted roots are searched for known vault files (so a new drive letter still reconnects) and unknown ones are offered for **adopt**. |
+| Push | Verified move: copy into the container while hashing, compare SHA-256, then delete the local file. The queue runs one item at a time with live progress; a full vault leaves the local copy untouched. |
+| Play | While the vault is connected, `/api/archive/items/{id}/video` streams the entry's bytes with HTTP Range support (seeking works). Disconnected cards say which vault to connect. |
+| Restore | Copy an entry back to local archive storage (hash-checked), then free its space in the vault. "Return to gallery" also works directly for a vaulted clip while its vault is connected: it verifies the copy into `Storage/videos/<job_id>/`, frees the vault entry, and removes the archive copy. |
+| Delete | Local files go immediately. A vaulted clip whose device is unplugged becomes **queued delete** and is removed automatically on reconnect. |
+| Grow / delete vault | Grow-only (the file is extended); deleting a vault wipes its container and the archived clips inside it, after confirmation. |
+
+| Piece | Where |
+|---|---|
+| Index | `Storage/archive/archive.db` |
+| Videos + posters | `Storage/archive/files/<id>/` |
+| Vault file | the folder you pick, `<name>-<id8>.osvault` |
+| API | `GET /api/archive/items`, `POST /api/archive/clips`, `POST /api/archive/items/push`, `.../items/restore`, `.../items/unarchive`, `.../items/delete`, `GET /api/archive/items/{id}/video`, `.../poster`, `GET/POST /api/archive/vaults`, `PATCH/DELETE /api/archive/vaults/{id}`, `POST /api/archive/vaults/scan`, `.../adopt`, `GET /api/archive/devices`, `.../browse`, `GET/PATCH /api/archive/settings` |
+
+Vault files are not encrypted: the key in the header identifies the vault to
+this install, it does not protect the video. Keep the device itself safe.
+
 ## Clip Gallery: compact tiles, a full-viewport player, delete
 
 The library is a grid of small square posters (the viral score top-left, the
 platform marks and duration bottom-right, the title under it). A tile does not
 play inline: clicking it opens a full-viewport modal with the real player, the
-score, the tags, the YouTube title and both captions (each with a copy button),
-the Facebook/YouTube marks, archive and **delete**. Escape or the backdrop
-closes it.
+score, the five tags, the Facebook post and the clean YouTube title and
+description (each with a copy button), the Facebook/YouTube marks, archive and
+**delete**. Escape or the backdrop closes it.
 
 Each tile is a **JPEG still**, not a video: the API writes `poster_clip_N.jpg`
 (a frame about a second in, 640 px wide) next to the clip, caches it, and the
@@ -157,6 +243,19 @@ deduped) and tops it up from the clip's own hashtags/title so every clip has
 exactly five. Clips rendered before the field existed get five derived from
 their title/description on read, without rewriting old metadata.
 
+Copy is shaped for the two platforms this install publishes to (`clip_copy.py`):
+
+- `facebook_title` — the post body, two blank lines, then exactly five hashtags
+  built from `tags`.
+- `youtube_title` — clean, no hashtags, at most 100 characters.
+- `youtube_description` — a 250-500 character summary, no hashtags.
+- `tags` — the same five words, for YouTube's separate tag field.
+
+The detail and vision prompts ask for these fields directly; the old
+`video_description_for_tiktok` / `video_description_for_instagram` keys are no
+longer written and are only read as a fallback for clips rendered before the
+split.
+
 Each clip has two pieces of review state, stored in
 `Storage/clip_state.json` (keyed `<job_id>:<index>`, so a re-render that renames
 the file keeps them):
@@ -169,9 +268,17 @@ the file keeps them):
   `{"platform": "facebook", "posted": true}` or
   `{"platforms": {"facebook": true, "youtube": false}}`; the legacy
   `{"used": true}` still works and converts on the first platform toggle.
-- **Archived** — hides the card from the library but keeps the file. The
-  Archived tab restores one clip; **archive used (N)** moves every used clip in
-  one call.
+- **Archived** — moves the clip out of the working folder into the Archive page
+  (the file is kept permanently there). Restoring returns it to the gallery
+  while the job folder and its metadata still exist; **archive used (N)** moves
+  every used clip in one call, and in **select** mode **archive (n)** moves only
+  the clips you ticked (`POST /api/archive/clips` with those refs).
+- **Staged platforms** — when auto-archive is on, a clip posted on only YouTube
+  or only Facebook does not move by itself. As soon as it has that one mark, the
+  header offers **archive yt-only (n)** and **archive fb-only (n)**; pressing
+  one archives exactly that group. Clips posted on both platforms archive
+  automatically after the delay, and the times come from the persisted
+  per-platform marks, so the delay elapses while the app is closed.
 
 Filtering and paging happen server-side (`GET /api/gallery/clips`) before the
 page is cut, so the tab badges, the pager and the grid agree with each other:
@@ -179,7 +286,8 @@ page is cut, so the tab badges, the pager and the grid agree with each other:
 - `limit` (max 100) + `page`, or the legacy `offset`; the answer carries
   `total`, `page`, `pages` and `has_more`. A page past the end is clamped, not
   an error, so a stale link lands on the last page.
-- `view=active|archived|all` and `usage=any|used|unused` (the four tabs).
+- `view=active|archived|all` and `usage=any|used|unused` (the three active tabs;
+  archived cards now live on the Archive page).
 - `platform=any|youtube|facebook|both|none` — the independent per-platform
   marks, not just the combined used flag.
 - `date=any|today|yesterday|week|month|custom` with `date_from`/`date_to`
@@ -189,7 +297,8 @@ page is cut, so the tab badges, the pager and the grid agree with each other:
 - `sort=newest|oldest|longest|shortest|score` — sorting happens on the whole
   filtered set before the page is cut, so "longest" is the longest in the
   library, not on the page.
-- `q=` searches title, hook, tags, both captions and the job id.
+- `q=` searches title, hook, tags, the Facebook post, the YouTube description
+  and the job id.
 
 The web UI sends every one of these through its filter bar (search, rendered
 date, posted-on chips, sort, per-page size) and shows numbered server-side
@@ -198,7 +307,9 @@ pages with prev/next instead of the old infinite scroll.
 `PATCH /api/gallery/clip/{job_id}/{index}` sets the flags;
 `POST /api/gallery/archive-used` archives every used clip (the button is hidden
 while a date/platform/search filter is active, because the call itself is not
-filtered). Stale keys for deleted jobs are pruned on the next scan.
+filtered), and `GET /api/gallery/archive-staged` lists the single-platform
+groups while `POST /api/gallery/archive-staged` with `{"platform": "youtube"}`
+runs one. Stale keys for deleted jobs are pruned on the next scan.
 
 The modal player letterboxes the clip with `object-fit: contain` instead of
 cropping it, so a 16:9 or 1:1 render is shown in full.
@@ -227,16 +338,19 @@ attribution.
 The caption look used to be editable only AFTER a clip was rendered. It is now
 chosen before the job starts:
 
-- **Clip Generator** → under the output format: a **style profile** selector and
-  a **burn captions** toggle. Advanced options holds the full caption editor
-  (presets, font, size, colour, highlight, border, background box, position,
-  uppercase, reveal, dim, shadow, animation, max chars/block) with a live
-  preview. The look is sent as `caption_style` on `/api/process`.
-- **Playground** (`04`) — the same controls on a bigger stage, over a real clip
-  from the library (or a neutral stage), with sample text, output format and
-  hook style. Save the combination as a profile.
+- **Clip Generator** → under the output format: a **style profile** selector
+  (default **auto · current defaults**, so the shipped look is used without a
+  choice) and a **burn captions** toggle. The full caption editor is no longer
+  in advanced options: the generator picks a profile, and the look is sent as
+  `caption_style` on `/api/process`. Choosing auto clears the last profile's
+  look back to the shipped default.
+- **Playground** (`04`) — the full editor (presets, font, size, colour,
+  highlight, border, background box, position, uppercase, reveal, dim, shadow,
+  animation, max chars/block) on a bigger stage, over a real clip from the
+  library (or a neutral stage), with sample text, output format and hook style.
+  Save the combination as a profile.
 - **Style Profiles** (`05`) — the saved bundles. **use** applies one to the Clip
-  Generator (every control stays editable); **edit** reopens it in the
+  Generator (the generator then sends that look); **edit** reopens it in the
   Playground; **delete** removes it. Cards render the saved look.
 
 A profile is:
@@ -252,8 +366,8 @@ A profile is:
 Stored in `Storage/style_profiles.json`; managed through
 `GET/POST/PATCH/DELETE /api/style-profiles`. `/api/process` also accepts
 `style_profile_id` (an agent can name a profile instead of repeating fields);
-explicit request fields win over the profile, so the dashboard can apply one and
-still let the user tweak a control.
+explicit request fields win over the profile, so an agent can apply one and
+override individual fields.
 
 Pipeline side: `/api/process` validates the look (`caption_style.py`) and sets
 `AUTO_CAPTION_STYLE_JSON`; `main.auto_caption_clip` merges it over
@@ -438,6 +552,17 @@ OpenAI-compatible providers as `image_url` data URLs. A level whose model cannot
 see images fails that call and the next level gets a turn; no stage is locked to
 Gemini.
 
+OpenAI-compatible calls stream by default, so a slow provider is visible in the
+job log (`🧠 AI stream: 1,240 chars in 12s`) instead of going silent for minutes.
+`LLM_STREAM=0` turns that off. An empty reply now names the provider and the
+reason it was empty (routed model, `finish_reason`, token split) and the retry
+policy reads those fields — a 400/policy refusal fails fast, a 429/5xx/truncated
+stream is retried. Note that aliases such as OpenRouter's `openrouter/free`
+route every call to a random free model, so identical requests can land on a
+reasoning model that spends its whole output budget thinking and returns no
+content; `LLM_MAX_TOKENS` gives it more room, a fixed model is more predictable,
+and `LLM_REASONING_EFFORT=low` (OpenRouter only) shrinks the thinking budget.
+
 ## AI prompts — editable, seeded with the current text
 
 Settings → **Prompts** lists the instruction blocks with their live text, the
@@ -449,7 +574,7 @@ next job.
 | Prompt id | Default constant | Used by |
 |---|---|---|
 | `score` | `gemini_worker.SCORE_PROMPT_TEMPLATE` | moment picker pass 1 (0-100, "2-second test") |
-| `detail` | `gemini_worker.DETAIL_PROMPT_TEMPLATE` | pass 2: final cuts, hook, title, captions |
+| `detail` | `gemini_worker.DETAIL_PROMPT_TEMPLATE` | pass 2: final cuts, hook, Facebook post, YouTube title/description, tags |
 | `visual` | `gemini_worker.VISUAL_PROMPT_TEMPLATE` | silent videos (Gemini video or stills) |
 | `layout` | `gemini_worker.LAYOUT_CHOICE_PROMPT` | reframe choice (none / screencast / split) |
 | `screen_content` | `gemini_worker.SHOT_CONTENT_PROMPT` | screen / beside / camera per shot |
@@ -471,7 +596,9 @@ Other knobs that are not prompt text:
 
 - **Clip count and length**: `CLIP_TARGET_MIN/MAX`, `CLIP_MIN_SECONDS`,
   `CLIP_MAX_SECONDS` (or the dashboard's advanced options / the matching form
-  fields) are formatted into `detail`.
+  fields) are formatted into `detail`. No 15-clip ceiling: a large target
+  widens the shortlist and the detail pass runs in `LLM_DETAIL_BATCH`-sized
+  calls (16 windows for Gemini, 4 for OpenAI-compatible servers).
 - **Agents** get no system prompt from this app; through MCP the agent's own
   prompt decides the cuts.
 
@@ -586,12 +713,13 @@ and TransNetV2/YOLO are never resident together.
 | `Dockerfile` | new documented, **off by default** build arg `TORCH_CUDA_INDEX` (see "GPU driver" below) |
 | `render-service/Dockerfile` | pins `remotion`/`@remotion/bundler`/`@remotion/renderer` to 4.0.541 to match `remotion/package-lock.json`. Mixing 4.0.446 with 4.0.541 crashed the renderer with `export 'Interactive' was not found in 'remotion'`. |
 | `app.py` | `GET /api/gallery/clips` — a real disk-backed gallery (the S3 one was commented out), `GET /api/overview` for the home dashboard, and `geminiEnvKey` in `/api/config` |
-| `dashboard/src/App.jsx` | top-bar shell, six-tab nav, no source preview while processing |
+| `dashboard/src/App.jsx` | top-bar shell, page-per-nav-item routing (`/clip-generator`, `/clip-gallery`, `/settings`…, see `src/lib/routes.js`), no source preview while processing |
 | `dashboard/src/components/HomeDashboard.jsx` | new home page: stats, quick start, machine panel, recent clips |
 | `dashboard/src/components/Gallery.jsx` | routes clip URLs through `getApiUrl` (media tokens) |
 | `dashboard/src/contexts/AuthContext.jsx` | exposes `geminiEnvKey` |
 | `dashboard/src/tokens.css`, `tailwind.config.js`, `index.css` | neutral night + ember-orange palette, squarer buttons |
 | `dashboard/src/main.jsx` | no landing route: `/` and `#app` both open the app |
+| `dashboard/src/lib/routes.js` | nav pages as real URLs: `/` home, `/clip-generator`, `/clip-gallery`, `/shelf`, `/playground`, `/style-profiles`, `/ai-agent`, `/youtube-studio`, `/settings`; old `#app?tab=…` links redirect to them |
 | deleted | `Landing.jsx`, `landing.css`, `SaaShortsTab`, `UGCGallery`, `AutopilotTab`, `ProcessingAnimation` |
 
 ## What the app looks like now
@@ -642,10 +770,11 @@ each job's `*_metadata.json` and returns the clips that really rendered:
   `q`) and paging (`limit`, `page`, legacy `offset`) all run before the page is
   cut; the response adds `total`, `page`, `pages` and `has_more`.
 
-Clips live in `Storage/videos/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days)
-and are trimmed oldest-first once `OUTPUT_MAX_GB` is reached. To keep them on
-another disk, set `OPENSHORTS_STORAGE` (see **Storage** above) instead of
-moving the working directory.
+Clips live in `Storage/videos/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days
+in the local `.env`) and are trimmed oldest-first once `OUTPUT_MAX_GB` is
+reached. Archive a clip to keep it permanently in `Storage/archive/` (never
+swept). To keep the whole tree on another disk, set `OPENSHORTS_STORAGE` (see
+**Storage** above) instead of moving the working directory.
 
 ## GPU driver (resolved)
 

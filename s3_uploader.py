@@ -44,6 +44,7 @@ def upload_file_to_s3(file_path, bucket_name, s3_key):
 from botocore.config import Config
 import json
 import time as time_module
+import clip_copy
 
 # Simple in-memory cache for gallery clips
 _clips_cache = {
@@ -161,9 +162,10 @@ def list_all_clips(bucket_name=None, limit=50, force_refresh=False):
                             "job_id": job_id,
                             "index": i,
                             "url": signed_url,
-                            "title": clip.get('video_title_for_youtube_short', 'Untitled Clip'),
-                            "tiktok_desc": clip.get('video_description_for_tiktok', ''),
-                            "insta_desc": clip.get('video_description_for_instagram', ''),
+                            "title": clip_copy.youtube_title(clip) or 'Untitled Clip',
+                            "facebook_title": clip_copy.facebook_title(clip),
+                            "youtube_description": clip_copy.youtube_description(clip),
+                            "tags": clip.get('tags', ''),
                             "created_at": meta_obj['LastModified'].isoformat(),
                             "duration": clip.get('end', 0) - clip.get('start', 0)
                         })

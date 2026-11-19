@@ -5,8 +5,6 @@ import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
 import CollectorPicker from './CollectorPicker';
-import CaptionControls from './CaptionControls';
-import CaptionStage from './CaptionStage';
 import { DEFAULT_CAPTION_STYLE, presetToStyle } from '../lib/captionStyles';
 
 const SUPPORTED_PLATFORMS = [
@@ -555,7 +553,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             </span>
                             {!files.length && (
                                 <span className="readout block mt-2">
-                                    MP4, MOV up to {bulk ? '2 GB each' : '500MB'} · at least {MIN_SOURCE_SECONDS}s long
+                                    MP4, MOV · at least {MIN_SOURCE_SECONDS}s long
                                 </span>
                             )}
                         </button>
@@ -610,7 +608,8 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
                 {/* Style profile + captions: visible without opening advanced,
                     because the whole point is choosing the look BEFORE the
-                    render. A profile can still be tweaked below. */}
+                    render. The full caption editor lives on Style Profiles and
+                    the Playground; here a profile is the only choice. */}
                 <div className="mt-4 grid sm:grid-cols-2 gap-3">
                     <label className="block">
                         <span className="eyebrow">style profile</span>
@@ -620,6 +619,9 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                                 const id = e.target.value;
                                 if (!id) {
                                     setStyleProfileId('');
+                                    // Back to the shipped default rather than
+                                    // leaving the last profile's look behind.
+                                    setCaptionStyle(presetToStyle(null));
                                     return;
                                 }
                                 const profile = profiles.find((p) => p.id === id);
@@ -627,11 +629,15 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             }}
                             className="input-field mt-1 text-sm"
                         >
-                            <option value="">custom / shipped default</option>
+                            <option value="">auto · current defaults</option>
                             {profiles.map((p) => (
                                 <option key={p.id} value={p.id}>{p.name}</option>
                             ))}
                         </select>
+                        <span className="mt-1 block text-[11px] leading-relaxed text-muted">
+                            Auto keeps the shipped look (and any look saved before profiles).
+                            Create or edit profiles on the Style Profiles page.
+                        </span>
                     </label>
                     <label className="flex items-center gap-2 text-xs text-ink2 sm:mt-5 cursor-pointer select-none">
                         <input
@@ -664,7 +670,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             <div>
                                 <p className="eyebrow mb-1.5">clips to aim for</p>
                                 <input
-                                    type="number" min="1" max="15" step="1"
+                                    type="number" min="1" step="1"
                                     value={targetClips}
                                     onChange={(e) => setTargetClips(e.target.value)}
                                     placeholder="auto"
@@ -693,7 +699,8 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             </div>
                             <p className="col-span-1 sm:col-span-3 text-[11px] leading-relaxed text-muted">
                                 Targets, not guarantees: the AI returns fewer clips when the
-                                material doesn't hold them. Leave blank to let it decide.
+                                material doesn't hold them. No upper limit — long videos can
+                                yield 100s of clips. Leave blank to let it decide.
                             </p>
                             <div className="col-span-1 sm:col-span-3 flex flex-wrap items-center justify-between gap-3 pt-3 sm:pt-1 border-t border-rule">
                                 <span className="text-xs text-ink2">vertical layout</span>
@@ -741,31 +748,12 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                                     </p>
                                 )}
                             </div>
-                            <div className="col-span-1 sm:col-span-3 pt-3 border-t border-rule space-y-3">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <span className="text-xs text-ink2">captions &amp; style</span>
-                                    <span className="text-[11px] text-muted">
-                                        the Playground has the same controls with a bigger preview
-                                    </span>
-                                </div>
-                                {captionsOn ? (
-                                    <div className="flex flex-col lg:flex-row gap-4">
-                                        <CaptionStage
-                                            style={captionStyle}
-                                            playing={false}
-                                            className="w-[140px] shrink-0 self-start rounded-input border border-rule"
-                                        />
-                                        <div className="flex-1 min-w-0">
-                                            <CaptionControls value={captionStyle} onChange={setCaptionStyle} />
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <p className="text-[11px] leading-relaxed text-muted">
-                                        Captions are off for this job. The source may already carry
-                                        burned-in subtitles, or you can add them later from the clip’s
-                                        subtitle button.
-                                    </p>
-                                )}
+                            <div className="col-span-1 sm:col-span-3 pt-3 border-t border-rule">
+                                <p className="text-[11px] leading-relaxed text-muted">
+                                    The caption look comes from the style profile above (or the
+                                    shipped default). Edit looks on the <strong>Style Profiles</strong>{' '}
+                                    page; the Playground has the full editor with a bigger preview.
+                                </p>
                             </div>
                         </div>
                     )}

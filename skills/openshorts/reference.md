@@ -76,9 +76,12 @@ source duration could not be determined.
 
 `GET /api/status/{job_id}` returns `{"status": ..., "logs": [...], "result": ...}`
 where status is `queued`, `processing`, `completed` or `failed`. `result.clips`
-appears once completed, each entry carrying `title`,
-`video_title_for_youtube_short`, `video_description_for_tiktok`,
-`video_description_for_instagram`, `start`, `end` and `video_url`. A relative
+appears once completed, each entry carrying `title`, `facebook_title` (post
+body with five hashtags), `youtube_title` (clean), `youtube_description`
+(250-500 chars), `tags` (five, comma-separated), `start`, `end` and
+`video_url`. Metadata written before this split still carries
+`video_title_for_youtube_short` and the old TikTok/Instagram descriptions;
+readers fall back to them. A relative
 `video_url` is relative to the API base and, on the hosted service, needs the
 same API key header to download; each clip also carries `download_url`, an
 absolute link signed for 24 hours that works without it.

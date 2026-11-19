@@ -27,8 +27,8 @@ def lookup_model_prices(model_name):
     return MODEL_PRICES[best_key] if best_key else None
 
 
-def clip_count_targets(n_windows):
-    """How many clips to ask the detail pass for, given the shortlist size.
+def clip_count_targets(n_windows, respect_env=True):
+    """How many clips to ask one detail call for, given its window count.
 
     Measured on prod 3-ago-2026: 408 of 429 jobs (95%) delivered 3 clips or
     fewer, the mode being ONE, while the prompt was free to return one per
@@ -42,16 +42,21 @@ def clip_count_targets(n_windows):
     no floor to stop it collapsing to a single clip. This puts a floor and a
     realistic ceiling on it instead.
 
-    ``CLIP_TARGET_MIN`` / ``CLIP_TARGET_MAX`` override both for A/B runs
-    without a deploy (the reframe-testing harness drives them).
+    There is no fixed 15-clip product cap: hours-long videos are split into
+    several detail calls (``main.detail_window_batch``) and each call gets the
+    band for the windows it was given. ``CLIP_TARGET_MIN`` /
+    ``CLIP_TARGET_MAX`` still override both for A/B runs and for the user's own
+    target (the caller sets them together); the per-batch calls pass
+    ``respect_env=False`` so one explicit target is not asked of every batch.
     """
     import os
 
     n = max(1, int(n_windows or 1))
     # Floor grows with the material: 3 windows -> 3, 5 -> 4, 10+ -> 6.
     low = max(2, min(6, n // 2 + 2))
-    # Ceiling allows a rich window to yield more than one without inviting padding.
-    high = min(12, max(4, n * 2))
+    # Ceiling allows a rich window to yield more than one without inviting
+    # padding. No 12-clip clamp: the shortlist size is what bounds the job.
+    high = max(4, n * 2)
     low = min(low, high)
 
     def _override(name, current):
@@ -63,23 +68,34 @@ def clip_count_targets(n_windows):
         except ValueError:
             return current
 
-    low = _override("CLIP_TARGET_MIN", low)
-    high = _override("CLIP_TARGET_MAX", high)
+    if respect_env:
+        low = _override("CLIP_TARGET_MIN", low)
+        high = _override("CLIP_TARGET_MAX", high)
     return low, max(low, high)
 
 
-def shortlist_target(video_duration):
+def shortlist_target(video_duration, target_clips=None):
     """How many scored windows the detail pass should get.
 
     Scales with duration so a long video surfaces more candidates without
-    exploding the detail call, floored at 3 so a short one still gets a
-    choice. ``score_batches`` exists to make this number reachable.
+    exploding one detail call; the caller sends them in batches. A user target
+    also widens the shortlist (about two candidate windows per requested clip)
+    so 100s of clips are not limited by a 10-window shortlist.
+
+    ``score_batches`` exists to make this number reachable.
     """
     try:
         seconds = float(video_duration or 0)
     except (TypeError, ValueError):
         seconds = 0.0
-    return max(3, min(10, int(seconds // 90) + 2))
+    target = max(3, int(seconds // 90) + 2)
+    if target_clips:
+        n = max(1, int(target_clips))
+        # Never shortlist more than the requested job can use, and never let
+        # the duration-derived number alone cap a large request.
+        target = min(target, max(3, n * 2))
+        target = max(target, n // 2 + 2)
+    return target
 
 
 def score_batches(windows, batch_size):

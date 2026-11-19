@@ -2,13 +2,16 @@ import os
 import llm_backend
 import platform_compat
 import prompt_store
+import clip_copy
 import clip_tags
 import settings_store
 import caption_style as caption_style_mod
 import style_profiles
 import storage
 import collector
+import downloads
 import clip_state
+import archive
 import re
 import sys
 import uuid
@@ -35,7 +38,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
@@ -62,7 +65,12 @@ storage.ensure()
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
-MAX_FILE_SIZE_MB = 2048  # 2GB limit
+# Per-file upload ceiling, in MB. 0 (the default) means no ceiling: the collector
+# and the clip generator stream uploads to disk in chunks, so a large source
+# costs disk space, not memory. A hosted deploy that wants a guard rail can set
+# MAX_FILE_SIZE_MB to a positive number.
+MAX_FILE_SIZE_MB = max(0, int(os.environ.get("MAX_FILE_SIZE_MB", "0") or 0))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024 if MAX_FILE_SIZE_MB > 0 else None
 
 # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
 # TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
@@ -2864,7 +2872,7 @@ def _enforce_uploads_size_cap():
     """Delete the oldest source uploads while UPLOAD_DIR is over UPLOADS_MAX_GB.
 
     Sources are only needed while a job runs (and for the preview afterwards),
-    but they're the biggest files on disk — up to MAX_FILE_SIZE_MB each.
+    but they're the biggest files on disk — often several GB each.
     """
     cap = UPLOADS_MAX_GB * 1024 ** 3
     if cap <= 0:
@@ -3703,7 +3711,7 @@ async def _notify_clips_ready(job_id):
             user = await s.get(User, job['user_id'])
         if not user or not user.email:
             return
-        title = clips[0].get('video_title_for_youtube_short') or clips[0].get('title') or "Your video"
+        title = clip_copy.youtube_title(clips[0]) or clips[0].get('title') or "Your video"
         await send_clips_ready_email(user.email, title, len(clips), _clips_ready_url())
     except Exception as e:
         print(f"⚠️  Clips-ready email error for {job_id}: {e}")
@@ -3733,7 +3741,7 @@ async def _notify_clip_activity(job_id):
             sub = await metering._active_subscription(s, user.id)
         if sub is None:
             return
-        title = clips[0].get('video_title_for_youtube_short') or clips[0].get('title') or "video"
+        title = clip_copy.youtube_title(clips[0]) or clips[0].get('title') or "video"
         n = len(clips)
         await _alerts.send_telegram(
             f"🎬 Clips created\n{user.email} ({sub.plan}) — “{title}” ({n} clip{'s' if n != 1 else ''})")
@@ -3860,7 +3868,7 @@ async def _webhook_clip_entries(job_id, job):
         rel = clip.get('video_url') or ""
         entries.append({
             "index": i,
-            "title": clip.get('title') or clip.get('video_title_for_youtube_short'),
+            "title": clip_copy.youtube_title(clip) or clip.get('title'),
             # Signed: a webhook consumer has no session to show /videos.
             "video_url": _signed_media_url(rel, base) if rel.startswith("/") else rel,
         })
@@ -4180,6 +4188,13 @@ async def lifespan(app: FastAPI):
     # Deliveries cut by the last instance (rendered, not delivered) need the
     # DB, which is up now.
     _start_pending_deliveries()
+    # Archive: reconnect external vaults, migrate clips archived by the old
+    # flag-only archive, and run the auto-archive rule. Never blocks or breaks
+    # startup: a missing device or an unwritable index must not stop the API.
+    try:
+        archive.start()
+    except Exception as exc:  # noqa: BLE001 - archive is optional infrastructure
+        print(f"⚠️ Archive disabled for this run: {exc}")
     # The worker starts only now, so the first job it takes off the queue was
     # already ranked by its owner's current plan.
     worker_task = asyncio.create_task(process_queue())
@@ -4498,6 +4513,8 @@ app.mount("/thumbnails", RestoringStaticFiles(
 # allowlist only serves images/videos, so the index (items.json) stays private
 # even though it sits in the same directory.
 collector.ensure()
+downloads.ensure()
+archive.ensure()
 app.mount("/collector", RestoringStaticFiles(
     directory=collector.COLLECTOR_DIR, guard=media_auth.is_servable), name="collector")
 
@@ -5736,7 +5753,7 @@ async def create_upload(request: Request):
         body = {}
     filename = _clamp_upload_name(os.path.basename(str((body or {}).get("filename") or "video.mp4")) or "video.mp4")
     if BILLING_ENABLED:
-        # Each slot can hold MAX_FILE_SIZE_MB on disk until it expires.
+        # Each slot can hold a whole source on disk until it expires.
         now = time.time()
         open_slots = sum(1 for sl in pending_uploads.values()
                          if sl.get("user_id") == user_id
@@ -5759,7 +5776,8 @@ async def create_upload(request: Request):
         "upload_id": upload_id,
         "upload_url": f"{_upload_url_base(request)}/api/uploads/{upload_id}",
         "method": "PUT",
-        "max_mb": MAX_FILE_SIZE_MB,
+        # None means the slot accepts a file of any size.
+        "max_mb": MAX_FILE_SIZE_MB or None,
         "expires_in": UPLOAD_TTL_SECONDS,
         "hint": "PUT the raw video bytes to upload_url (e.g. curl -T video.mp4 <upload_url>), "
                 "then call /api/process (or the process_video tool) with this upload_id. "
@@ -5770,18 +5788,18 @@ async def create_upload(request: Request):
 
 @app.put("/api/uploads/{upload_id}")
 async def put_upload(upload_id: str, request: Request):
-    """Receive the raw video body for a reserved slot. Streams to disk, capped
-    at MAX_FILE_SIZE_MB; a second PUT replaces the first."""
+    """Receive the raw video body for a reserved slot. Streams to disk, with an
+    optional MAX_FILE_SIZE_MB cap; a second PUT replaces the first."""
     slot = pending_uploads.get(upload_id)
     if not slot or time.time() - slot["created"] > UPLOAD_TTL_SECONDS:
         pending_uploads.pop(upload_id, None)
         raise HTTPException(status_code=404, detail="Unknown or expired upload_id")
-    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    limit_bytes = MAX_FILE_SIZE_BYTES
     size = 0
     with open(slot["path"], "wb") as out:
         async for chunk in request.stream():
             size += len(chunk)
-            if size > limit_bytes:
+            if limit_bytes is not None and size > limit_bytes:
                 out.close()
                 os.remove(slot["path"])
                 raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
@@ -5861,7 +5879,7 @@ async def collector_upload(file: UploadFile = File(...)):
     try:
         return await asyncio.to_thread(
             collector.add_upload, file.filename or "video.mp4", file,
-            MAX_FILE_SIZE_MB * 1024 * 1024, _media_duration_seconds, _collector_thumb)
+            MAX_FILE_SIZE_BYTES, _media_duration_seconds, _collector_thumb)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -5896,6 +5914,323 @@ async def collector_remove(item_id: str):
     if not await asyncio.to_thread(collector.delete, item_id):
         raise HTTPException(status_code=404, detail="Collector item not found")
     return {"deleted": item_id}
+
+
+# --- Download Manager: full sources in temp, split into the Collector --------
+@app.get("/api/downloads")
+async def downloads_list():
+    items = await asyncio.to_thread(downloads.list_items)
+    return {"items": items}
+
+
+@app.post("/api/downloads")
+async def downloads_add(request: Request):
+    """Add one link, or several (one per line), and start downloading them."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw = (body or {}).get("urls")
+    if raw is None:
+        raw = [(body or {}).get("url")]
+    if isinstance(raw, str):
+        raw = raw.splitlines()
+    try:
+        return {"items": await asyncio.to_thread(downloads.add_urls, list(raw or []))}
+    except ValueError as e:
+        raise HTTPException(status_code=400,
+                            detail=(str(e).strip() or "Paste a video link.")[:400])
+
+
+@app.patch("/api/downloads/{item_id}")
+async def downloads_configure(item_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        return await asyncio.to_thread(
+            downloads.configure, item_id, (body or {}).get("chunk_seconds"))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Download item not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/downloads/split-all")
+async def downloads_split_all(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    items = (body or {}).get("items") or []
+    return {"items": await asyncio.to_thread(downloads.start_split_all, items)}
+
+
+@app.post("/api/downloads/{item_id}/split")
+async def downloads_split(item_id: str, request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if downloads.get_public(item_id) is None:
+        raise HTTPException(status_code=404, detail="Download item not found")
+    try:
+        await asyncio.to_thread(downloads.start_split, [item_id],
+                                (body or {}).get("chunk_seconds"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"items": await asyncio.to_thread(downloads.list_items)}
+
+
+@app.delete("/api/downloads/{item_id}")
+async def downloads_remove(item_id: str):
+    try:
+        if not await asyncio.to_thread(downloads.delete, item_id):
+            raise HTTPException(status_code=404, detail="Download item not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"deleted": item_id}
+
+
+# --- Archive: permanent clips, external storage vaults ----------------------
+def _archive_http_error(exc):
+    """Map the archive module's exceptions onto HTTP answers."""
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail="Not in the archive")
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=409, detail=str(exc)[:400])
+    if isinstance(exc, ValueError):
+        text = str(exc).strip() or "That archive action is not possible."
+        return HTTPException(status_code=409, detail=text[:400])
+    return HTTPException(status_code=500, detail="The archive action failed.")
+
+
+def _archive_job(fn, *args, **kwargs):
+    """Kept as one place for the error mapping; the call itself runs in a thread."""
+    return asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def _archive_call(fn, *args, **kwargs):
+    try:
+        return await _archive_job(fn, *args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - mapped to an HTTP answer
+        raise _archive_http_error(exc)
+
+
+@app.get("/api/archive/items")
+async def archive_items(limit: int = 48, page: int = 1, q: str = "",
+                        date: str = "any", date_from: str = "", date_to: str = "",
+                        vault: str = "any", state: str = "any",
+                        platform: str = "any", sort: str = "newest"):
+    try:
+        return await asyncio.to_thread(
+            archive.list_items, limit=limit, page=page, q=q, date=date,
+            date_from=date_from, date_to=date_to, vault=vault, state=state,
+            platform=platform, sort=sort)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/archive/clips")
+async def archive_clips_endpoint(request: Request):
+    """``{"clips": [{"job_id": "...", "index": 0}, ...]}``."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    refs = (body or {}).get("clips") or []
+    if not isinstance(refs, list):
+        raise HTTPException(status_code=400, detail="clips must be a list")
+    return await asyncio.to_thread(archive.archive_clips, refs)
+
+
+@app.post("/api/archive/items/unarchive")
+async def archive_unarchive_many(request: Request):
+    body = await _request_json(request)
+    results = {"unarchived": [], "failed": []}
+    for item_id in body.get("ids") or []:
+        try:
+            await asyncio.to_thread(archive.unarchive, item_id)
+            results["unarchived"].append(item_id)
+        except Exception as exc:
+            results["failed"].append({"id": item_id, "error": str(exc)[:300]})
+    return results
+
+
+@app.post("/api/archive/items/restore")
+async def archive_restore(request: Request):
+    body = await _request_json(request)
+    return await asyncio.to_thread(archive.restore_items, body.get("ids") or [])
+
+
+@app.post("/api/archive/items/delete")
+async def archive_delete(request: Request):
+    body = await _request_json(request)
+    return await asyncio.to_thread(archive.delete_items, body.get("ids") or [])
+
+
+@app.post("/api/archive/items/push")
+async def archive_push(request: Request):
+    body = await _request_json(request)
+    return await _archive_call(
+        archive.push_items, body.get("ids") or [], body.get("vault_id"))
+
+
+@app.post("/api/archive/items/{item_id}/cancel")
+async def archive_cancel_push(item_id: str):
+    return await asyncio.to_thread(archive.cancel_push, item_id)
+
+
+@app.get("/api/archive/items/{item_id}/poster")
+async def archive_poster(item_id: str):
+    path = await asyncio.to_thread(archive.poster_path, item_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="No poster for this clip")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/archive/items/{item_id}/video")
+async def archive_video(item_id: str, request: Request):
+    """Serve one archived clip, seeking inside a vault container when needed."""
+    source = await asyncio.to_thread(archive.stream_source, item_id)
+    if not source:
+        item = await asyncio.to_thread(archive.get_item, item_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Not in the archive")
+        if item.get("state") == "missing":
+            raise HTTPException(status_code=410, detail="This clip's file is missing from its vault.")
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Connect the device that holds “{item.get('vault_name')}” "
+                    "to play this clip.") if item.get("vault_name") else
+                   "This clip is not available.")
+    path, offset, size, title = source
+    download = request.query_params.get("download") in ("1", "true", "yes")
+    return _range_stream(path, offset, size, request, title, download)
+
+
+def _request_json_body(body):
+    return body if isinstance(body, dict) else {}
+
+
+async def _request_json(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return _request_json_body(body)
+
+
+def _byte_range(header, size):
+    """``(start, end)`` for one Range header, or ``None`` (whole file)."""
+    return archive.byte_range(header, size)
+
+
+def _range_stream(path, offset, size, request, title="clip", download=False):
+    """A file slice with Range support (a vault entry is an offset, not a path)."""
+    try:
+        window = _byte_range(request.headers.get("range"), size)
+    except ValueError:
+        return Response(status_code=416,
+                        headers={"Content-Range": f"bytes */{size}"})
+    start, end = window if window else (0, max(0, size - 1))
+    length = end - start + 1 if size else 0
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Cache-Control": "private, max-age=0",
+    }
+    if window:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    if download:
+        safe = re.sub(r"[^A-Za-z0-9 _.-]", "_", title or "clip").strip() or "clip"
+        headers["Content-Disposition"] = f'attachment; filename="{safe}.mp4"'
+
+    def chunks():
+        with open(path, "rb") as handle:
+            handle.seek(offset + start)
+            remaining = length
+            while remaining > 0:
+                block = handle.read(min(256 * 1024, remaining))
+                if not block:
+                    break
+                remaining -= len(block)
+                yield block
+
+    return StreamingResponse(
+        chunks(), status_code=206 if window else 200, headers=headers,
+        media_type="video/mp4")
+
+
+@app.get("/api/archive/vaults")
+async def archive_vaults(scan: bool = True):
+    if scan:
+        await asyncio.to_thread(archive.scan_if_stale, 5)
+    return await asyncio.to_thread(archive.list_vaults)
+
+
+@app.post("/api/archive/vaults")
+async def archive_vault_create(request: Request):
+    body = await _request_json(request)
+    return await _archive_call(
+        archive.create_vault, body.get("folder"), body.get("name"),
+        body.get("size_bytes"))
+
+
+@app.patch("/api/archive/vaults/{vault_id}")
+async def archive_vault_update(vault_id: str, request: Request):
+    body = await _request_json(request)
+    return await _archive_call(
+        archive.update_vault, vault_id, name=body.get("name"),
+        size_bytes=body.get("size_bytes"))
+
+
+@app.delete("/api/archive/vaults/{vault_id}")
+async def archive_vault_delete(vault_id: str, request: Request, confirm: bool = False):
+    if not confirm:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        confirm = bool((body or {}).get("confirm"))
+    return await _archive_call(archive.delete_vault, vault_id, confirm=confirm)
+
+
+@app.post("/api/archive/vaults/scan")
+async def archive_vault_scan():
+    return await asyncio.to_thread(archive.scan)
+
+
+@app.post("/api/archive/vaults/adopt")
+async def archive_vault_adopt(request: Request):
+    body = await _request_json(request)
+    return await _archive_call(archive.adopt_vault, body.get("path"))
+
+
+@app.get("/api/archive/devices")
+async def archive_devices():
+    return await asyncio.to_thread(archive.devices)
+
+
+@app.get("/api/archive/browse")
+async def archive_browse(path: str = ""):
+    return await _archive_call(archive.browse, path)
+
+
+@app.get("/api/archive/settings")
+async def archive_settings():
+    data = await asyncio.to_thread(archive.get_settings)
+    data["job_retention_seconds"] = JOB_RETENTION_SECONDS
+    return data
+
+
+@app.patch("/api/archive/settings")
+async def archive_settings_update(request: Request):
+    body = await _request_json(request)
+    return await _archive_call(
+        archive.set_settings, enabled=body.get("auto_archive_enabled"),
+        days=body.get("auto_archive_days"))
 
 
 def _sweep_pending_uploads(now=None):
@@ -6248,7 +6583,7 @@ async def process_endpoint(
     # are honest TARGETS, not guarantees — the model may return fewer clips
     # when the material doesn't hold them. Bad values 400 instead of silently
     # producing something the user didn't ask for.
-    def _gen_control(raw, name, lo, hi, integer=False):
+    def _gen_control(raw, name, lo, hi=None, integer=False):
         if raw in (None, ""):
             return None
         try:
@@ -6257,12 +6592,17 @@ async def process_endpoint(
             raise HTTPException(status_code=400, detail=f"{name} must be a number")
         if integer and val != int(val):
             raise HTTPException(status_code=400, detail=f"{name} must be an integer")
-        if not (lo <= val <= hi):
+        if val < lo or (hi is not None and val > hi):
+            if hi is None:
+                raise HTTPException(status_code=400,
+                                    detail=f"{name} must be at least {lo:g}")
             raise HTTPException(status_code=400,
                                 detail=f"{name} must be between {lo:g} and {hi:g}")
         return int(val) if integer else val
 
-    n_clips = _gen_control(target_clips, "target_clips", 1, 15, integer=True)
+    # No 15-clip ceiling: an hours-long source can legitimately yield 100s of
+    # clips. The pipeline splits a large target across detail calls.
+    n_clips = _gen_control(target_clips, "target_clips", 1, None, integer=True)
     min_secs = _gen_control(clip_min_seconds, "clip_min_seconds", 5, 175)
     max_secs = _gen_control(clip_max_seconds, "clip_max_seconds", 10, 180)
     if min_secs is not None and max_secs is not None and max_secs < min_secs + 5:
@@ -6374,12 +6714,12 @@ async def process_endpoint(
 
         # Read file in chunks to check size
         size = 0
-        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+        limit_bytes = MAX_FILE_SIZE_BYTES
 
         with open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
                 size += len(content)
-                if size > limit_bytes:
+                if limit_bytes is not None and size > limit_bytes:
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
                     raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
@@ -6438,8 +6778,8 @@ async def process_endpoint(
 
     # Meter + reserve minutes for managed users (no-op for BYOK / self-host).
     # A refusal (402 quota, 429 job limit, 400 unreadable source) deletes the
-    # source it was handed instead of leaving up to MAX_FILE_SIZE_MB on disk
-    # until the retention sweep; an agent upload goes back to its slot.
+    # source it was handed instead of leaving it on disk until the retention
+    # sweep; an agent upload goes back to its slot.
     try:
         user_id, priority, reservation_id, user_plan, partial = await reserve_process_minutes(
             request, url, input_path, job_id, max_minutes=max_minutes,
@@ -7447,7 +7787,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
     return {
         "job_id": job_id,
         "clip_index": clip_index,
-        "title": clip.get('video_title_for_youtube_short') or '',
+        "title": clip_copy.youtube_title(clip) or '',
         "segments": segments,
         "framing": (clip.get('recipe') or {}).get('framing') or 'auto',
         "canonical_range": canonical_range,
@@ -8935,8 +9275,12 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
 
         # Construct parameters for Upload-Post API
         # Fallbacks
-        final_title = req.title or clip.get('title', 'Viral Short')
-        final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
+        final_title = (req.title or clip_copy.youtube_title(clip)
+                       or clip.get('title', 'Viral Short'))
+        final_description = (req.description
+                             or clip_copy.youtube_description(clip)
+                             or clip_copy.facebook_title(clip)
+                             or "Check this out!")
         
         # Prepare form data
         url = "https://api.upload-post.com/api/upload"
@@ -8968,9 +9312,12 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
              data_payload["media_type"] = "REELS"
 
         if "youtube" in req.platforms:
-             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
+             yt_title = (req.title or clip_copy.youtube_title(clip)
+                         or final_title)
              data_payload["youtube_title"] = youtube_title(yt_title)
-             data_payload["youtube_description"] = final_description
+             data_payload["youtube_description"] = (
+                 req.description or clip_copy.youtube_description(clip)
+                 or final_description)
              data_payload["privacyStatus"] = "public"
 
         # The upload is a blocking multipart POST of the whole clip (tens of
@@ -9500,19 +9847,19 @@ async def _download_thumbnail_source(url, session_id, paid_allowed=True, cap_min
 
 
 async def _save_thumbnail_upload(file, session_id):
-    """Stream an uploaded file to UPLOAD_DIR (size-capped) and, in cloud mode,
-    probe its length. Returns ``(path, minutes)``; the file is deleted when it
-    is refused (too big, unreadable or too long)."""
+    """Stream an uploaded file to UPLOAD_DIR (optionally size-capped) and, in
+    cloud mode, probe its length. Returns ``(path, minutes)``; the file is
+    deleted when it is refused (too big, unreadable or too long)."""
     # basename() stops a "../../x" filename from escaping UPLOAD_DIR; the
     # chunked read caps memory so a huge body can't OOM.
     safe_name = _clamp_upload_name(os.path.basename(file.filename or "upload") or "upload")
     video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
     size = 0
-    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    limit_bytes = MAX_FILE_SIZE_BYTES
     with open(video_path, "wb") as buffer:
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
-            if size > limit_bytes:
+            if limit_bytes is not None and size > limit_bytes:
                 buffer.close()
                 os.remove(video_path)
                 raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
@@ -10358,6 +10705,41 @@ def _gallery_poster_ready(output_dir, clip_path, index):
     return None
 
 
+# Poster dimensions, keyed by (path, mtime): a gallery page asks for the same
+# JPEGs on every poll, and re-opening 24 files per request is pointless. The
+# mtime in the key is what makes a regenerated poster re-read.
+_POSTER_SIZE_CACHE: Dict[tuple, tuple] = {}
+_POSTER_SIZE_CACHE_MAX = 5000
+
+
+def _poster_size(path):
+    """``(width, height)`` of a cached poster, or ``(None, None)``.
+
+    The card uses this to reserve the tile at the clip's own aspect ratio: a
+    fixed square frame with ``object-fit: cover`` cropped 9:16 stills to a
+    stripe. Pillow only reads the JPEG header here, and the size is cached.
+    """
+    try:
+        stamp = os.path.getmtime(path)
+    except OSError:
+        return None, None
+    key = (path, stamp)
+    hit = _POSTER_SIZE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    size = (None, None)
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            size = image.size
+    except Exception:
+        size = (None, None)
+    if len(_POSTER_SIZE_CACHE) >= _POSTER_SIZE_CACHE_MAX:
+        _POSTER_SIZE_CACHE.clear()
+    _POSTER_SIZE_CACHE[key] = size
+    return size
+
+
 def _make_gallery_poster(output_dir, clip_path, index, duration):
     """Write a still frame for a gallery tile (a JPEG), or None on failure.
 
@@ -10401,7 +10783,7 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
         duration = max(0.0, float(clip.get("end", 0)) - float(clip.get("start", 0)))
     except (TypeError, ValueError):
         duration = 0.0
-    title = (clip.get("video_title_for_youtube_short")
+    title = (clip_copy.youtube_title(clip)
              or clip.get("viral_hook_text")
              or f"Clip {index + 1}")
     poster = _gallery_poster_ready(output_dir, filename, index)
@@ -10415,6 +10797,10 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
         # answering, so only the modal's <video> ever requests the clip bytes.
         "poster": (f"/videos/{job_id}/{os.path.basename(poster)}"
                    if poster else None),
+        # The card paints the tile at the clip's aspect ratio, not a square.
+        # Filled for the page below, so a scan does not read every poster.
+        "poster_width": None,
+        "poster_height": None,
         "duration": duration,
         "created_at": created_at,
         "score": clip.get("predicted_score"),
@@ -10423,10 +10809,16 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
         # old metadata on disk.
         "tags": clip.get("tags") or clip_tags.five(
             None, title,
-            (clip.get("video_description_for_tiktok"),
-             clip.get("video_description_for_instagram"))),
-        "tiktok_desc": clip.get("video_description_for_tiktok"),
-        "insta_desc": clip.get("video_description_for_instagram"),
+            (clip.get("youtube_description"),
+             clip.get("video_description_for_instagram"),
+             clip.get("video_description_for_tiktok"))),
+        # Facebook post (title + hashtags) and the clean YouTube copy. The old
+        # per-network caption keys stay for callers that still read them.
+        "facebook_title": clip_copy.facebook_title(clip),
+        "youtube_title": title,
+        "youtube_description": clip_copy.youtube_description(clip),
+        "tiktok_desc": clip_copy.facebook_title(clip),
+        "insta_desc": clip_copy.facebook_title(clip),
     }
 
 
@@ -10485,7 +10877,8 @@ def _gallery_matches_query(entry, query: str) -> bool:
         return True
     needle = query.casefold()
     haystack = " ".join(str(entry.get(key) or "") for key in (
-        "title", "hook", "tags", "tiktok_desc", "insta_desc", "job_id"))
+        "title", "hook", "tags", "facebook_title", "youtube_description",
+        "tiktok_desc", "insta_desc", "job_id"))
     return needle in haystack.casefold()
 
 
@@ -10627,6 +11020,14 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
     start = (page - 1) * limit
     clips = matched[start:start + limit]
 
+    # The tile is painted at the clip's aspect ratio. Reading a cached poster's
+    # size is cheap but not free, so only the page being returned pays for it.
+    for clip in clips:
+        if clip.get("poster"):
+            poster_path = os.path.join(OUTPUT_DIR, clip["job_id"],
+                                       os.path.basename(clip["poster"]))
+            clip["poster_width"], clip["poster_height"] = _poster_size(poster_path)
+
     # Tiles are stills (see _make_gallery_poster). Fill the ones this page
     # needs in parallel; clips left out by the page/filters cost nothing, and
     # a repeat request reuses the cached JPEG. Four at a time: a first page can
@@ -10644,6 +11045,7 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
                                         entry.get("duration"))
             if made:
                 entry["poster"] = f"/videos/{entry['job_id']}/{os.path.basename(made)}"
+                entry["poster_width"], entry["poster_height"] = _poster_size(made)
 
         async def _fill(entry):
             async with slots:
@@ -10721,17 +11123,70 @@ async def set_gallery_clip_state(job_id: str, index: int, request: Request):
     if ("used" not in body and "archived" not in body
             and platforms is None):
         raise HTTPException(status_code=400, detail="Nothing to change")
-    return await asyncio.to_thread(
+    archived_flag = body.get("archived")
+    flags = await asyncio.to_thread(
         clip_state.set_flags, job_id, index,
-        used=body.get("used"), archived=body.get("archived"),
-        platforms=platforms)
+        used=body.get("used"), platforms=platforms)
+    # The gallery's archive toggle is the entry point into the Archive page:
+    # "archive" moves the file into the permanent store, "restore" moves it
+    # back while the job folder (and its metadata) still exists.
+    if archived_flag is not None:
+        try:
+            if archived_flag:
+                await asyncio.to_thread(archive.archive_clip, job_id, index)
+            else:
+                await asyncio.to_thread(archive.unarchive_ref, job_id, index)
+        except (ValueError, PermissionError) as e:
+            raise HTTPException(status_code=409, detail=str(e)[:400])
+        flags = await asyncio.to_thread(clip_state.flags, job_id, index)
+    return flags
 
 
 @app.post("/api/gallery/archive-used")
 async def archive_used_clips():
     """Archive every clip marked used, in one go (restore stays per clip)."""
-    archived = await asyncio.to_thread(clip_state.archive_used)
-    return {"archived": archived}
+    states = await asyncio.to_thread(clip_state.snapshot)
+    refs = []
+    for key, flags in states.items():
+        if not flags.get("used") or flags.get("archived"):
+            continue
+        try:
+            job_id, index = key.rsplit(":", 1)
+            refs.append({"job_id": job_id, "index": int(index)})
+        except (TypeError, ValueError):
+            continue
+    result = await asyncio.to_thread(archive.archive_clips, refs) if refs else {
+        "archived": [], "failed": []}
+    # A used clip whose file already vanished from retention still belongs in
+    # "archived" (that was the old flag-only behaviour and keeps the Used tab
+    # from offering it again).
+    await asyncio.to_thread(
+        clip_state.archive_used,
+        [(ref["job_id"], ref["index"]) for ref in refs])
+    return {"archived": len(refs), "moved": len(result["archived"]),
+            "failed": result["failed"]}
+
+
+@app.get("/api/gallery/archive-staged")
+async def gallery_archive_staged():
+    """Single-platform clips whose auto-archive delay has elapsed, by platform.
+
+    Nothing is moved: the gallery draws one button per non-empty group, so a
+    clip posted on only YouTube or only Facebook never leaves the library until
+    the user runs that button.
+    """
+    return await asyncio.to_thread(archive.staged_archives)
+
+
+@app.post("/api/gallery/archive-staged")
+async def gallery_archive_staged_run(request: Request):
+    """Archive the staged group for one platform (``facebook`` or ``youtube``)."""
+    body = await _request_json(request)
+    platform = body.get("platform")
+    try:
+        return await asyncio.to_thread(archive.archive_staged, platform)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _delete_gallery_clip_files(job_id: str, index: int, wait: bool = True):

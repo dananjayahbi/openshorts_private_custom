@@ -21,6 +21,16 @@ export default function GalleryCard({
 }) {
     const platforms = clip.platforms || {};
     const onAnyPlatform = !!(platforms.facebook || platforms.youtube);
+    // The tile follows the clip's own frame, not a fixed square: the pipeline
+    // renders 9:16 shorts, and `object-cover` in an `aspect-square` box threw
+    // away most of the picture. The API sends the poster's size so the grid can
+    // reserve the right height before the JPEG arrives (and lazy loading still
+    // works); a clip without one falls back to the usual vertical shape.
+    const posterWidth = Number(clip.poster_width);
+    const posterHeight = Number(clip.poster_height);
+    const hasPosterSize = Number.isFinite(posterWidth) && Number.isFinite(posterHeight)
+        && posterWidth > 0 && posterHeight > 0;
+    const aspectRatio = hasPosterSize ? `${posterWidth} / ${posterHeight}` : '9 / 16';
 
     const activate = () => {
         if (selectMode) onToggleSelect?.(clip);
@@ -37,7 +47,7 @@ export default function GalleryCard({
                 aria-label={selectMode ? `Select ${clip.title}` : `Open ${clip.title}`}
                 className="block w-full text-left"
             >
-                <div className="relative aspect-square bg-black overflow-hidden">
+                <div className="relative bg-black overflow-hidden" style={{ aspectRatio }}>
                     {/* A still frame, not a player. A video source is what a
                         browser download manager treats as "save this MP4"; a
                         JPEG is not, so only the modal (the one place a clip is
@@ -50,10 +60,10 @@ export default function GalleryCard({
                             loading="lazy"
                             decoding="async"
                             draggable={false}
-                            className="w-full h-full object-cover pointer-events-none"
+                            className="absolute inset-0 w-full h-full object-cover pointer-events-none"
                         />
                     ) : (
-                        <div className="w-full h-full" aria-hidden="true" />
+                        <div className="absolute inset-0" aria-hidden="true" />
                     )}
 
                     <div className="absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-black/80 to-transparent" />

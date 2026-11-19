@@ -422,7 +422,7 @@ export default function SettingsPage({ billingEnabled, isManaged, onChoosePlan }
             <div className="w-full p-3 sm:p-6">
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
                     <div>
-                        <p className="eyebrow mb-1.5">08 · SETTINGS</p>
+                        <p className="eyebrow mb-1.5">09 · SETTINGS</p>
                         <h1 className="font-display lowercase text-2xl text-ink">Settings</h1>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted mt-1">

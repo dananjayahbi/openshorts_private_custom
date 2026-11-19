@@ -74,6 +74,13 @@ class TestUpload:
         assert os.listdir(os.path.join(str(shelf), "files")) == []
         assert collector.list_items() == []
 
+    def test_no_ceiling_accepts_the_file(self, shelf):
+        item = collector.add_upload("huge.mp4", FakeUpload(b"x" * 2000), None,
+                                    _probe_ok, _thumb_ok)
+        assert item["ready"] is True
+        assert item["size_bytes"] == 2000
+        assert os.listdir(os.path.join(str(shelf), "files")) != []
+
     def test_an_empty_file_is_removed(self, shelf):
         with pytest.raises(ValueError):
             collector.add_upload("empty.mp4", FakeUpload(b""), 1000,

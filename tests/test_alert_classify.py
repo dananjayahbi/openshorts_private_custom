@@ -26,6 +26,16 @@ def test_gemini():
     assert _classify_failure("google.genai error 500") == "gemini"
 
 
+def test_any_chain_provider_is_not_reported_as_gemini():
+    """The chain is vendor-neutral: an empty body from OpenRouter must not
+    read as a Google outage (prod 15-nov-2026)."""
+    assert _classify_failure(
+        "AI provider returned an empty response body (openai · openrouter/free, "
+        "finish_reason=length)"
+    ) == "ai provider"
+    assert _classify_failure("LLM server 503 from http://x/v1: busy") == "ai provider"
+
+
 def test_ffmpeg():
     assert _classify_failure("ffmpeg failed during reframe") == "ffmpeg/render"
 

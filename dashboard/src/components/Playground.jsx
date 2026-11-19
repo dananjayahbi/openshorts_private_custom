@@ -125,7 +125,7 @@ export default function Playground({ initialProfile = null, onSaved, onOpenProfi
             <div className="w-full p-3 sm:p-6">
                 <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
                     <div>
-                        <p className="eyebrow mb-1.5">04 · PLAYGROUND</p>
+                        <p className="eyebrow mb-1.5">05 · PLAYGROUND</p>
                         <h1 className="font-display lowercase text-2xl text-ink">style playground</h1>
                         <p className="text-sm text-muted mt-1.5 max-w-2xl">
                             Try a caption look and an output shape before rendering. Save the

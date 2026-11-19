@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     Archive, ArchiveRestore, Check, CheckCircle2, Circle, Copy, Download,
     Loader2, Trash2, X,
 } from 'lucide-react';
 import { getApiUrl } from '../config';
+import { youtubeTitle, youtubeDescription, facebookTitle } from '../lib/clipCopy';
 
 // The full-viewport clip view: the only place a clip plays. The gallery tile
 // is a poster; clicking it opens this. Editorial actions live here too, so the
@@ -16,6 +17,24 @@ const scoreTone = (score) => {
     if (n >= 60) return 'text-brass';
     return 'text-ink2';
 };
+
+// The API puts the useful sentence in ``detail``; raw JSON would end up in
+// the dialog ("{"detail":"The file is still open ..."}"), which is not a
+// message a person should have to read.
+const readError = async (res) => {
+    try {
+        const body = await res.json();
+        if (typeof body?.detail === 'string') return body.detail;
+        if (body?.detail?.message) return body.detail.message;
+    } catch (_) { /* not JSON */ }
+    return `HTTP ${res.status}`;
+};
+
+// Closing the <video> is not enough on Windows: the browser keeps the HTTP
+// response (and therefore the file handle) open while it may still buffer.
+// Archive is a rename, so the modal releases the player and gives the request
+// a moment to finish before asking the server to move the file.
+const RELEASE_PLAYER_MS = 250;
 
 const CopyField = ({ label, value, multiline = false }) => {
     const [copied, setCopied] = useState(false);
@@ -53,6 +72,17 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
     });
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
+    const videoRef = useRef(null);
+
+    const releasePlayer = useCallback(async () => {
+        const video = videoRef.current;
+        if (video) {
+            try { video.pause(); } catch (_) { /* already gone */ }
+            video.removeAttribute('src');
+            try { video.load(); } catch (_) { /* already gone */ }
+        }
+        await new Promise((resolve) => setTimeout(resolve, RELEASE_PLAYER_MS));
+    }, []);
 
     useEffect(() => {
         const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
@@ -74,7 +104,7 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
-            if (!res.ok) throw new Error((await res.text()).slice(0, 200) || `HTTP ${res.status}`);
+            if (!res.ok) throw new Error(await readError(res));
             const next = await res.json();
             setFlags({
                 used: !!next.used,
@@ -107,6 +137,13 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
         }
     };
 
+    const toggleArchive = async () => {
+        // Archiving renames the MP4 out of the job folder. Let the video
+        // response close first (Issue #8: the player itself was the lock).
+        if (!flags.archived) await releasePlayer();
+        await patch({ archived: !flags.archived }, 'archive');
+    };
+
     return (
         <div
             className="fixed inset-0 z-[130] bg-black/85 backdrop-blur-sm flex items-center justify-center p-0 sm:p-6 animate-fade"
@@ -122,6 +159,7 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                 {/* Player: the whole point of the modal */}
                 <div className="relative bg-black flex items-center justify-center min-h-0 flex-1 lg:max-h-[94vh]">
                     <video
+                        ref={videoRef}
                         src={clip.url}
                         controls
                         autoPlay
@@ -186,11 +224,9 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                     </div>
 
                     <CopyField label="tags" value={clip.tags} />
-                    <CopyField label="YouTube title" value={clip.title} />
-                    <CopyField label="TikTok caption" value={clip.tiktok_desc} multiline />
-                    {clip.insta_desc && clip.insta_desc !== clip.tiktok_desc && (
-                        <CopyField label="Instagram caption" value={clip.insta_desc} multiline />
-                    )}
+                    <CopyField label="Facebook post" value={facebookTitle(clip)} multiline />
+                    <CopyField label="YouTube title" value={youtubeTitle(clip)} />
+                    <CopyField label="YouTube description" value={youtubeDescription(clip)} multiline />
 
                     {error && <p className="text-[11px] text-danger" role="alert">{error}</p>}
 
@@ -205,7 +241,7 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                         <button
                             type="button"
                             disabled={!!busy}
-                            onClick={() => patch({ archived: !flags.archived }, 'archive')}
+                            onClick={toggleArchive}
                             className="btn-quiet text-xs py-1.5 px-2.5"
                         >
                             {busy === 'archive' ? <Loader2 size={13} className="animate-spin" />

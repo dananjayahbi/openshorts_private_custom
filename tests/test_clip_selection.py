@@ -126,9 +126,19 @@ class TestClipCountTargets:
         assert clip_count_targets(1)[0] <= 2
         assert clip_count_targets(2)[0] <= 3
 
-    def test_ceiling_is_capped_so_long_videos_do_not_explode(self):
-        assert clip_count_targets(40) == clip_count_targets(12)
-        assert clip_count_targets(40)[1] <= 12
+    def test_ceiling_scales_with_the_material_not_a_product_cap(self):
+        # Hours-long sources are allowed to yield 100s of clips: the band is
+        # derived from the windows this call was given, with no 12/15 clamp.
+        assert clip_count_targets(40)[1] == 80
+        assert clip_count_targets(100)[1] == 200
+        assert clip_count_targets(12)[1] < clip_count_targets(40)[1]
+
+    def test_per_batch_band_ignores_the_job_wide_override(self, monkeypatch):
+        monkeypatch.setenv("CLIP_TARGET_MIN", "100")
+        monkeypatch.setenv("CLIP_TARGET_MAX", "100")
+        assert clip_count_targets(10) == (100, 100)
+        low, high = clip_count_targets(10, respect_env=False)
+        assert high < 100 and low <= high
 
     def test_low_never_exceeds_high(self):
         for n in range(1, 40):
@@ -300,11 +310,17 @@ class TestScoreBatches:
 
 
 class TestShortlistTarget:
-    def test_scales_with_duration_and_is_capped(self):
+    def test_scales_with_duration_without_a_ceiling(self):
         assert shortlist_target(60) == 3          # floor
         assert shortlist_target(9 * 60) == 8      # the measured job
-        assert shortlist_target(60 * 60) == 10    # ceiling
-        assert shortlist_target(3 * 60 * 60) == 10
+        assert shortlist_target(60 * 60) == 42
+        assert shortlist_target(3 * 60 * 60) == 122
+
+    def test_a_clip_target_widens_the_shortlist(self):
+        # ~2 candidate windows per requested clip, so 100s of clips are not
+        # limited by the duration-derived shortlist alone.
+        assert shortlist_target(9 * 60, target_clips=200) == 102
+        assert shortlist_target(60, target_clips=10) == 7
 
     def test_degenerate_input_does_not_crash(self):
         assert shortlist_target(None) == 3

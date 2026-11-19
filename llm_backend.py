@@ -27,6 +27,7 @@ let those use a Gemini level from the chain instead of only the environment.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 from typing import Optional, Tuple, Type
@@ -282,6 +283,311 @@ def save_levels(raw_levels: list) -> list:
 
 # --- calls ------------------------------------------------------------------
 
+class ProviderError(RuntimeError):
+    """A provider was reached but did not deliver a usable answer.
+
+    The chain used to keep only the message, so an empty body from an
+    OpenAI-compatible level (OpenRouter, Ollama, …) surfaced as "Gemini
+    returned an empty response body" — the text came from gemini_worker's
+    parser, which pointed debugging at a service that was never called. These
+    fields name who actually failed, and ``transient`` tells
+    ``main._run_gemini_stage`` whether another attempt can plausibly work.
+    """
+
+    def __init__(self, message, *, provider="", model="", status=None,
+                 finish_reason=None, transient=True):
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.status = status
+        self.finish_reason = finish_reason
+        self.transient = transient
+
+
+# Tokens that mean "the same call can work in a moment" for a provider whose
+# exceptions we cannot inspect (the Google SDK flattens its errors to text).
+_TRANSIENT_TOKENS = (
+    '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED', '500', 'INTERNAL',
+    'overloaded', 'Deadline', 'timeout', 'timed out', '502', '504',
+    'empty response body',
+)
+
+
+def looks_transient(message: str) -> bool:
+    """True when ``message`` is a transient failure signature."""
+    text = (message or "").lower()
+    return any(token.lower() in text for token in _TRANSIENT_TOKENS)
+
+
+def _label(level: dict, model: Optional[str] = None) -> str:
+    return f"{level['provider']} · {model or _level_model(level)}"
+
+
+def stream_enabled() -> bool:
+    """Whether to ask an OpenAI-compatible server for an SSE stream.
+
+    On by default: the job log then shows that the provider is alive (and how
+    much reasoning it is burning) during what used to be a silent five-minute
+    POST. ``LLM_STREAM=0`` restores one buffered request. A server that ignores
+    ``stream`` answers plain JSON and is handled either way.
+    """
+    raw = (os.environ.get("LLM_STREAM") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _stream_report_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("LLM_STREAM_REPORT_SECONDS") or 10))
+    except ValueError:
+        return 10.0
+
+
+def _max_tokens() -> Optional[int]:
+    """``LLM_MAX_TOKENS`` for providers whose default budget is too small."""
+    raw = (os.environ.get("LLM_MAX_TOKENS") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _reasoning_extra(level: dict) -> dict:
+    """``LLM_REASONING_EFFORT`` (OpenRouter): shrink a reasoning model's
+    thinking budget so it reaches the JSON instead of spending it all.
+
+    Only sent to OpenRouter: other OpenAI-compatible servers reject unknown
+    fields, and OpenRouter ignores it for models that do not reason.
+    """
+    effort = (os.environ.get("LLM_REASONING_EFFORT") or "").strip().lower()
+    if not effort:
+        return {}
+    if "openrouter.ai" not in (level.get("base_url") or "").lower():
+        return {}
+    return {"reasoning": {"effort": effort}}
+
+
+def _content_text(value) -> str:
+    """Text of an OpenAI ``content`` field: string, parts list, or None."""
+    if isinstance(value, list):
+        return "".join(p.get("text", "") for p in value if isinstance(p, dict))
+    return value if isinstance(value, str) else ""
+
+
+def _is_event_stream(resp: httpx.Response) -> bool:
+    """True for SSE and for the NDJSON some local servers stream instead."""
+    ctype = (resp.headers.get("content-type") or "").lower()
+    return ("text/event-stream" in ctype or "ndjson" in ctype
+            or "jsonl" in ctype)
+
+
+def _http_error(level: dict, url: str, status: int, body: str,
+                model: str) -> ProviderError:
+    """An HTTP failure, with ``transient`` set from the status code."""
+    return ProviderError(
+        f"LLM server {status} from {url}: {body[:300]}",
+        provider=level["provider"], model=model, status=status,
+        transient=status in (408, 409, 425, 429) or status >= 500)
+
+
+def _completion_text(data: dict, level: dict, model: str):
+    """(text, reasoning, finish_reason, refusal) of the first choice."""
+    choices = data.get("choices") or []
+    if not choices:
+        raise ProviderError(
+            f"{_label(level, model)} returned no choices",
+            provider=level["provider"], model=model, transient=True)
+    choice = choices[0] or {}
+    msg = choice.get("message") or choice.get("delta") or {}
+    text = _content_text(msg.get("content"))
+    reasoning = _content_text(msg.get("reasoning") or msg.get("reasoning_content"))
+    finish_reason = (choice.get("finish_reason")
+                     or choice.get("native_finish_reason"))
+    return text, reasoning, finish_reason, msg.get("refusal")
+
+
+def _empty_body_message(level: dict, model: str, data: dict,
+                        finish_reason: Optional[str],
+                        refusal: Optional[str],
+                        reasoning_chars: int,
+                        streamed_frames: Optional[int] = None) -> str:
+    """Why a 200 answer held no JSON: the facts that used to be discarded."""
+    facts = [_label(level, model)]
+    served_model = (data or {}).get("model")
+    served_provider = (data or {}).get("provider")
+    if served_model and served_model != model:
+        served = f"{served_provider} {served_model}".strip() if served_provider \
+            else served_model
+        facts.append(f"served by {served}")
+    if finish_reason:
+        facts.append(f"finish_reason={finish_reason}")
+    usage = (data or {}).get("usage") or {}
+    completion = usage.get("completion_tokens")
+    if completion is not None:
+        facts.append(f"{completion} output tokens")
+    reasoning_tokens = ((usage.get("completion_tokens_details") or {})
+                        .get("reasoning_tokens"))
+    if reasoning_tokens:
+        facts.append(f"{reasoning_tokens} of them reasoning")
+    if reasoning_chars:
+        facts.append(f"{reasoning_chars} chars arrived only in the reasoning "
+                     "channel and hold no usable JSON")
+    if streamed_frames == 0:
+        facts.append("the response stream carried no events")
+    message = ("AI provider returned an empty response body ("
+               + ", ".join(facts) + ")")
+    if refusal:
+        return f"AI provider refused the request ({_label(level, model)}): {str(refusal)[:200]}"
+    if finish_reason == "length":
+        message += (" — the reply ran out of output tokens before writing any "
+                    "content; raise the provider's max output tokens "
+                    "(LLM_MAX_TOKENS) or pick a model that does not spend the "
+                    "whole budget reasoning")
+        if model.endswith(("/free", "/auto")):
+            message += ("; this alias routes every call to a random model, so "
+                        "a retry may land on one with a bigger budget")
+    return message
+
+
+def _repeatable(finish_reason: Optional[str], model: str) -> bool:
+    """Whether the same call can plausibly come back different.
+
+    A length cut on a fixed model is deterministic — retrying pays the same
+    minutes for the same truncation. A random-routing alias ("openrouter/free")
+    can land on a model with more room, and a content filter is deterministic
+    everywhere.
+    """
+    if finish_reason in ("content_filter", "refusal"):
+        return False
+    if finish_reason == "length":
+        return model.endswith(("/free", "/auto")) or model == "auto"
+    return True
+
+
+def _stream_progress(chars: int, reasoning_chars: int, elapsed: float) -> str:
+    bits = [f"{chars:,} chars"]
+    if reasoning_chars:
+        bits.append(f"{reasoning_chars:,} reasoning chars")
+    return f"🧠 AI stream: {' · '.join(bits)} in {elapsed:.0f}s"
+
+
+def _consume_stream(resp: httpx.Response, level: dict, model: str) -> dict:
+    """Read an SSE completion, logging progress while it arrives.
+
+    Returns the same shape as a buffered call, with the routed provider/model
+    that OpenRouter reports so the error/log names the model that answered,
+    not only the alias that was asked for.
+    """
+    label = _label(level, model)
+    started = time.monotonic()
+    last_report = started
+    content = []
+    reasoning = []
+    chars = reasoning_chars = 0
+    finish_reason = native_finish_reason = None
+    usage: dict = {}
+    served_provider = served_model = ""
+    frames = 0
+    print(f"🧠 AI stream: waiting for {label}…")
+    for line in resp.iter_lines():
+        line = (line or "").strip()
+        if not line:
+            continue           # blank line between events, or a keep-alive
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+        elif line.startswith("{"):
+            payload = line      # NDJSON, e.g. Ollama's native shape
+        else:
+            continue           # ": keep-alive" comment or an unknown frame
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue           # a server that splits JSON across data lines
+        frames += 1
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("error"):
+            err = chunk["error"]
+            detail = err.get("message") if isinstance(err, dict) else err
+            raise ProviderError(
+                f"AI provider stream error ({label}): {str(detail)[:300]}",
+                provider=level["provider"], model=model, transient=True)
+        usage = chunk.get("usage") or usage
+        served_provider = chunk.get("provider") or served_provider
+        served_model = chunk.get("model") or served_model
+        choices = chunk.get("choices")
+        if not choices and isinstance(chunk.get("message"), dict):
+            choices = [chunk]   # Ollama's native NDJSON shape
+        for choice in choices or []:
+            delta = choice.get("delta") or choice.get("message") or {}
+            piece = _content_text(delta.get("content"))
+            if piece:
+                content.append(piece)
+                chars += len(piece)
+            think = _content_text(delta.get("reasoning")
+                                  or delta.get("reasoning_content"))
+            if think:
+                reasoning.append(think)
+                reasoning_chars += len(think)
+            finish_reason = (choice.get("finish_reason")
+                             or choice.get("done_reason") or finish_reason)
+            native_finish_reason = (choice.get("native_finish_reason")
+                                    or native_finish_reason)
+        now = time.monotonic()
+        if now - last_report >= _stream_report_seconds():
+            last_report = now
+            print(_stream_progress(chars, reasoning_chars, now - started))
+    elapsed = time.monotonic() - started
+    done = f"🧠 AI stream done: {chars:,} chars"
+    if reasoning_chars:
+        done += f" (+{reasoning_chars:,} reasoning)"
+    done += f" in {elapsed:.0f}s"
+    if finish_reason:
+        done += f", finish_reason={finish_reason}"
+    if served_model and served_model != model:
+        done += f" · served by {served_model}"
+    print(done)
+    preview = " ".join("".join(content).split())[:160]
+    if preview:
+        print(f"🧠 AI stream reply: {preview}")
+    return {
+        "text": "".join(content),
+        "reasoning": "".join(reasoning),
+        "finish_reason": finish_reason or native_finish_reason,
+        "data": {"usage": usage, "provider": served_provider,
+                 "model": served_model},
+        "streamed": True,
+        "frames": frames,
+    }
+
+
+def _consume_json(resp: httpx.Response, level: dict, model: str) -> dict:
+    """A buffered (non-streamed) completion body."""
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise ProviderError(
+            f"{_label(level, model)} returned a body that is not JSON: "
+            f"{type(e).__name__}: {str(e)[:120]}",
+            provider=level["provider"], model=model, transient=True) from e
+    if not isinstance(data, dict):
+        raise ProviderError(
+            f"{_label(level, model)} returned {type(data).__name__} "
+            "instead of an object",
+            provider=level["provider"], model=model, transient=True)
+    text, reasoning, finish_reason, refusal = _completion_text(data, level, model)
+    preview = " ".join(text.split())[:160]
+    if preview:
+        print(f"🧠 AI reply: {preview}")
+    return {"text": text, "reasoning": reasoning,
+            "finish_reason": finish_reason, "refusal": refusal, "data": data,
+            "streamed": False, "frames": 0}
+
+
 def _headers(level: dict) -> dict:
     # Ollama ignores the key but the OpenAI client convention (and vLLM with
     # --api-key) wants the header present; "ollama" is the documented placeholder.
@@ -332,48 +638,114 @@ def _generate_openai(level: dict, prompt: str, schema: Type[BaseModel],
             {"role": "user", "content": prompt},
         ]
     last_rejection: Optional[str] = None
-    with _client(timeout=level["timeout"]) as client:
-        for fmt in _response_formats(schema):
-            body = {"model": model, "messages": messages, "temperature": 0.2, "stream": False}
+    stream = stream_enabled()
+    max_tokens = _max_tokens()
+    body_extra = dict(_reasoning_extra(level))
+    if max_tokens:
+        body_extra["max_tokens"] = max_tokens
+    result: Optional[dict] = None
+    for fmt in _response_formats(schema):
+        include_usage = stream
+        while True:
+            body = {"model": model, "messages": messages, "temperature": 0.2,
+                    "stream": stream, **body_extra}
+            if include_usage:
+                # Ask for token counts in the final chunk; a server that does
+                # not know stream_options is retried below without it.
+                body["stream_options"] = {"include_usage": True}
             if fmt is not None:
                 body["response_format"] = fmt
-            resp = client.post(url, json=body, headers=_headers(level))
-            if fmt is not None and _is_format_rejection(resp):
-                # The server does not know this response_format flavour; the
-                # next loop iteration asks for a looser one.
-                last_rejection = resp.text[:200]
-                continue
-            if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"LLM server {resp.status_code} from {url}: {resp.text[:300]}")
-            data = resp.json()
+            # ``stream`` also for the buffered path: a server that ignores it
+            # answers plain JSON, which _consume_json handles.
+            with _client(timeout=level["timeout"]) as client:
+                with client.stream("POST", url, json=body,
+                                   headers=_headers(level)) as resp:
+                    if fmt is not None and _is_format_rejection(resp):
+                        # The server does not know this response_format
+                        # flavour; the next format is looser.
+                        last_rejection = resp.read().decode("utf-8",
+                                                            "replace")[:200]
+                        break
+                    if resp.status_code >= 400:
+                        body_text = resp.read().decode("utf-8", "replace")
+                        if include_usage and "stream_options" in body_text.lower():
+                            include_usage = False
+                            continue
+                        raise _http_error(level, url, resp.status_code,
+                                          body_text, model)
+                    if stream and _is_event_stream(resp):
+                        result = _consume_stream(resp, level, model)
+                    else:
+                        result = _consume_json(resp, level, model)
             break
-        else:
-            raise RuntimeError(
-                f"LLM server rejected every response_format variant: {last_rejection}")
+        if result is not None:
+            break
+    if result is None:
+        raise ProviderError(
+            f"LLM server rejected every response_format variant: {last_rejection}",
+            provider=level["provider"], model=model, transient=False)
 
-    choices = data.get("choices") or []
-    text = ""
-    if choices:
-        msg = choices[0].get("message") or {}
-        text = msg.get("content") or ""
-        if isinstance(text, list):  # some servers return content parts
-            text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-    parsed = gemini_worker._parse_json_response_text(text)
+    data = result["data"]
+    text = result["text"]
+    reasoning = result["reasoning"]
+    finish_reason = result["finish_reason"]
+    refusal = result.get("refusal")
+
+    # Some reasoning models write their answer into the reasoning channel and
+    # leave ``content`` empty. A JSON object there is the same answer, so use
+    # it instead of losing a five-minute generation.
+    if not text.strip() and not refusal and "{" in reasoning:
+        candidate = gemini_worker._extract_json_candidate(reasoning).strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            print(f"🧠 AI response: {_label(level, model)} answered in the "
+                  "reasoning channel; using that JSON.")
+            text = candidate
+
+    if not text.strip():
+        raise ProviderError(
+            _empty_body_message(level, model, data, finish_reason, refusal,
+                                len(reasoning),
+                                result.get("frames") if result.get("streamed")
+                                else None),
+            provider=level["provider"], model=model,
+            finish_reason=finish_reason,
+            transient=_repeatable(finish_reason, model))
+
+    try:
+        parsed = gemini_worker._parse_json_response_text(
+            text, provider=_label(level, model))
+    except ValueError as e:
+        raise ProviderError(
+            f"{e} (finish_reason={finish_reason}); reply starts: {text[:160]!r}",
+            provider=level["provider"], model=model,
+            finish_reason=finish_reason,
+            transient=_repeatable(finish_reason, model)) from e
+
     # Validate against the same schema Gemini enforces server-side, so a
     # local model that drops a field fails here with a readable error
     # (retried by the caller) instead of deep inside the clip pipeline.
-    validated = schema.model_validate(parsed).model_dump()
+    try:
+        validated = schema.model_validate(parsed).model_dump()
+    except Exception as e:
+        raise ProviderError(
+            f"{_label(level, model)} answer did not match "
+            f"{schema.__name__}: {str(e)[:200]}",
+            provider=level["provider"], model=model,
+            finish_reason=finish_reason, transient=True) from e
 
     usage = data.get("usage") or {}
+    # OpenRouter reports the routed model here; showing the alias
+    # ("openrouter/free") hid which model actually produced the answer.
+    served_model = data.get("model") or model
     cost = {
         "input_tokens": int(usage.get("prompt_tokens") or 0),
         "output_tokens": int(usage.get("completion_tokens") or 0),
-        "thinking_tokens": 0,
+        "thinking_tokens": int(((usage.get("completion_tokens_details") or {})
+                                .get("reasoning_tokens")) or 0),
         "input_cost": 0.0,
         "output_cost": 0.0,
         "total_cost": 0.0,
-        "model": model,
+        "model": served_model,
         "price_estimated": False,
         "local": True,
     }
@@ -399,22 +771,38 @@ def _generate_gemini(level: dict, prompt: str, schema: Type[BaseModel],
         parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
                  for b in images]
         contents = parts + [prompt]
-    response = client.models.generate_content(
-        model=model,
-        contents=contents,
-        config=genai_types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=schema,
-        ),
-    )
+    response = None
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+            ),
+        )
+    except gemini_worker.GeminiBlockedError:
+        raise
+    except Exception as e:
+        raise ProviderError(
+            f"Gemini ({model}) call failed: {type(e).__name__}: {str(e)[:300]}",
+            provider="gemini", model=model,
+            transient=looks_transient(str(e))) from e
     gemini_worker.raise_if_blocked(response)
     parsed_obj = getattr(response, "parsed", None)
     if parsed_obj is not None:
         payload = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
     else:
         payload = gemini_worker._parse_json_response_text(
-            gemini_worker._get_response_text(response))
-    validated = schema.model_validate(payload).model_dump()
+            gemini_worker._get_response_text(response),
+            provider=f"Gemini ({model})")
+    try:
+        validated = schema.model_validate(payload).model_dump()
+    except Exception as e:
+        raise ProviderError(
+            f"Gemini ({model}) answer did not match {schema.__name__}: "
+            f"{str(e)[:200]}",
+            provider="gemini", model=model, transient=True) from e
     return validated, gemini_worker._calculate_cost_analysis(response, model)
 
 

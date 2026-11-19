@@ -7,6 +7,8 @@ without hunting through the codebase:
     Storage/videos/<job_id>/...       job outputs, served at /videos/<job_id>/...
     Storage/thumbnails/<session>/...   served at /thumbnails/...
     Storage/uploads/                   transient sources (not served)
+    Storage/downloads/<id>/...         full sources fetched by Download Manager (not served)
+    Storage/archive/                   archived clips + archive.db (not swept, not served)
 
 Set ``OPENSHORTS_STORAGE`` to move the whole tree (absolute path is fine), for
 example to a larger disk. The default is relative: the same line then works in
@@ -19,11 +21,13 @@ STORAGE_DIR = os.environ.get("OPENSHORTS_STORAGE", "Storage")
 VIDEOS_DIR = os.path.join(STORAGE_DIR, "videos")
 THUMBNAILS_DIR = os.path.join(STORAGE_DIR, "thumbnails")
 UPLOADS_DIR = os.path.join(STORAGE_DIR, "uploads")
+DOWNLOADS_DIR = os.path.join(STORAGE_DIR, "downloads")
+ARCHIVE_DIR = os.path.join(STORAGE_DIR, "archive")
 
 # The directories the app writes to. ``videos`` is the only one that is
-# served as video; keep the three siblings so a sweep of one cannot touch
-# another (uploads and thumbnails have their own retention).
-SUBDIRS = (VIDEOS_DIR, THUMBNAILS_DIR, UPLOADS_DIR)
+# served as video; keep the siblings so a sweep of one cannot touch another
+# (uploads, thumbnails, downloads and archive have their own retention).
+SUBDIRS = (VIDEOS_DIR, THUMBNAILS_DIR, UPLOADS_DIR, DOWNLOADS_DIR, ARCHIVE_DIR)
 
 
 def ensure():

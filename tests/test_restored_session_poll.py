@@ -55,5 +55,6 @@ def test_app_ends_the_poll_and_drops_the_saved_session():
     assert "clearInterval(interval)" in effect
     # handleReset sets status to idle, which removes the saved session.
     assert "handleResetRef.current()" in effect
-    assert "setActiveTab('history')" in effect
+    # "History" is the Clip Gallery page: the old tab id no longer exists.
+    assert "setActiveTab('gallery')" in effect
     assert "setJobGone(true)" in effect

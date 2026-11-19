@@ -123,9 +123,17 @@ def gallery(tmp_path, monkeypatch):
     app_module = pytest.importorskip("app")
     from fastapi.testclient import TestClient
 
+    import archive
+
     videos = tmp_path / "videos"
     monkeypatch.setattr(app_module, "OUTPUT_DIR", str(videos))
     monkeypatch.setattr(storage, "STORAGE_DIR", str(tmp_path))
+    monkeypatch.setattr(storage, "VIDEOS_DIR", str(videos))
+    monkeypatch.setattr(archive, "ARCHIVE_DIR", str(tmp_path / "archive"))
+    monkeypatch.setattr(archive, "FILES_DIR", str(tmp_path / "archive" / "files"))
+    monkeypatch.setattr(archive, "DB_FILE", str(tmp_path / "archive" / "archive.db"))
+    monkeypatch.setattr(archive, "_kick", lambda: None)
+    archive.ensure()
 
     def job(job_id, clips):
         d = videos / job_id
@@ -252,19 +260,29 @@ class TestGalleryApi:
     def test_archive_moves_a_clip_out_of_the_library(self, gallery):
         gallery.patch("/api/gallery/clip/job-a/1", json={"archived": True})
 
+        # Archiving is a move into the permanent store now: the clip is gone
+        # from every gallery view and its card lives on the Archive page.
         assert "A1" not in _titles(gallery.get("/api/gallery/clips"))
-        assert _titles(gallery.get("/api/gallery/clips?view=archived")) == ["A1"]
-        assert "A1" in _titles(gallery.get("/api/gallery/clips?view=all"))
+        assert _titles(gallery.get("/api/gallery/clips?view=archived")) == []
+        assert "A1" not in _titles(gallery.get("/api/gallery/clips?view=all"))
         counts = gallery.get("/api/gallery/clips").json()["counts"]
-        assert counts == {"used": 0, "unused": 2, "archived": 1}
+        assert counts == {"used": 0, "unused": 2, "archived": 0}
+
+        archived = gallery.get("/api/archive/items").json()
+        assert archived["total"] == 1
+        assert archived["items"][0]["title"] == "A1"
+        assert archived["items"][0]["state"] == "local"
 
     def test_archive_all_used_is_one_call(self, gallery):
         gallery.patch("/api/gallery/clip/job-a/0", json={"used": True})
         gallery.patch("/api/gallery/clip/job-b/0", json={"used": True})
 
-        assert gallery.post("/api/gallery/archive-used").json() == {"archived": 2}
+        body = gallery.post("/api/gallery/archive-used").json()
+        assert body["archived"] == 2 and body["moved"] == 2
+        assert body["failed"] == []
         assert _titles(gallery.get("/api/gallery/clips")) == ["A1"]
-        assert sorted(_titles(gallery.get("/api/gallery/clips?view=archived"))) == ["A0", "B0"]
+        assert _titles(gallery.get("/api/gallery/clips?view=archived")) == []
+        assert gallery.get("/api/archive/items").json()["total"] == 2
 
     def test_restore_puts_a_clip_back(self, gallery):
         gallery.patch("/api/gallery/clip/job-a/0", json={"archived": True, "used": True})
@@ -295,6 +313,17 @@ class TestGalleryPosters:
         a0 = next(c for c in body["clips"]
                   if c["job_id"] == "job-a" and c["index"] == 0)
         assert a0["poster"] == "/videos/job-a/poster_clip_1.jpg"
+
+    def test_the_poster_size_rides_along_for_the_tile_ratio(self, gallery, tmp_path):
+        # The card paints the tile at the clip's aspect ratio; without the size
+        # it would have to assume a shape before the JPEG loads.
+        from PIL import Image
+        poster = tmp_path / "videos" / "job-a" / "poster_clip_1.jpg"
+        Image.new("RGB", (640, 1138), "black").save(poster, "JPEG")
+        body = gallery.get("/api/gallery/clips").json()
+        a0 = next(c for c in body["clips"]
+                  if c["job_id"] == "job-a" and c["index"] == 0)
+        assert (a0["poster_width"], a0["poster_height"]) == (640, 1138)
 
     def test_a_missing_poster_is_written_once_and_reused(self, gallery, monkeypatch, tmp_path):
         app_module = pytest.importorskip("app")

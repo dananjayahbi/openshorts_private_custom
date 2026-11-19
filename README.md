@@ -15,18 +15,33 @@ Docker.
 | Page | What it does |
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip, **unload vram** |
-| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or bulk queue; stop a run and remove its partial files |
-| Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, archive |
+| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or a queue that loops the same screen; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
+| Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, bulk-archive the selection, staged one-platform archive buttons |
+| Archive | Permanent clip store with advanced filters; push videos to external storage vaults and play them back when the device is connected |
 | Collector | Shelf of links and files; download later, queue, process |
+| Download Manager | Fetch full links into temp storage; cut each into its own part length and save the parts to the Collector |
 | Playground | Try caption looks and output shapes on a real clip, save the result as a profile |
 | Style Profiles | Saved caption/format bundles; apply one in the Clip Generator |
 | AI Agent | MCP connection snippets (Claude, ChatGPT, Cursor, n8n) |
 | YouTube Studio | Titles, descriptions and thumbnails for the clips |
 | Settings | Five-level AI provider chain (any OpenAI-compatible endpoint or Gemini), editable prompts, MCP how-to |
 
-Everything lives under `Storage/` (videos, thumbnails, uploads, collector) and
-is served by the API as a local CDN. `Storage/settings.json` holds the provider
-chain and prompt overrides; `Storage/style_profiles.json` the saved looks.
+Every page has its own URL, so it can be bookmarked, shared and reloaded:
+`/` (Home), `/clip-generator`, `/clip-gallery`, `/archive`, `/shelf` (Collector),
+`/download-manager`, `/playground`, `/style-profiles`, `/ai-agent`,
+`/youtube-studio`, `/settings`.
+Old `#app?tab=…` links are redirected to the matching page.
+
+Every clip's copy is shaped for Facebook and YouTube: a Facebook post (title,
+two blank lines, five hashtags), a clean YouTube title with no hashtags, a
+250-500 character YouTube description, and five comma-separated tags for
+YouTube's tag field.
+
+Everything lives under `Storage/` (videos, thumbnails, uploads, collector,
+downloads, archive) and is served by the API as a local CDN. `Storage/settings.json`
+holds the provider chain and prompt overrides; `Storage/style_profiles.json` the
+saved looks. Archived clips and their SQLite index live in `Storage/archive/`;
+external vaults are single preallocated `.osvault` files on the device you pick.
 
 ## Run it
 

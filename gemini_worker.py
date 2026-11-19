@@ -36,12 +36,15 @@ class DetailClipModel(BaseModel):
     end: float
     source_window_id: str
     predicted_score: int
-    video_description_for_tiktok: str
-    video_description_for_instagram: str
-    video_title_for_youtube_short: str
-    viral_hook_text: str
+    # Copy for the two platforms this install publishes to. The picker used to
+    # write a TikTok and an Instagram caption; these are shaped for Facebook and
+    # YouTube instead (see clip_copy.py).
+    facebook_title: str = ""
+    youtube_title: str = ""
+    youtube_description: str = ""
+    viral_hook_text: str = ""
     # Exactly five comma-separated tags for the post. Defaulted so a model that
-    # skips the field still validates; main normalises/tops it up to five.
+    # skips the field still validates; clip_copy normalises/tops it up to five.
     tags: str = ""
     # One sentence on what makes THIS moment a clip, shown under the score in
     # the dashboard. Defaulted so a small local model that skips it does not
@@ -60,10 +63,10 @@ class VisualClipModel(BaseModel):
     start: float
     end: float
     predicted_score: int
-    video_description_for_tiktok: str
-    video_description_for_instagram: str
-    video_title_for_youtube_short: str
-    viral_hook_text: str
+    facebook_title: str = ""
+    youtube_title: str = ""
+    youtube_description: str = ""
+    viral_hook_text: str = ""
     tags: str = ""
 
 
@@ -74,7 +77,7 @@ class VisualResponse(BaseModel):
 VISUAL_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. This video has NO speech/audio — judge
 it purely by what you SEE. Watch the whole thing and pick the {min_clips}–{max_clips} MOST engaging
-visual moments for TikTok / Reels / Shorts (action, reveals, transformations,
+visual moments for Facebook / YouTube Shorts (action, reveals, transformations,
 striking or funny shots, satisfying payoffs, dramatic movement).
 
 TIME CONTRACT — STRICT:
@@ -85,11 +88,12 @@ TIME CONTRACT — STRICT:
   shorter than {min_secs:g}s, return one clip spanning the full video.
 - Cut on visual scene changes, never mid-motion.
 
-For each clip write catchy copy in {language} (a scroll-stopping hook, a TikTok
-and an Instagram description, a YouTube title ≤100 chars, and exactly five
-comma-separated tags: lowercase, no #, the concrete subjects/actions/names of
-the moment). Order clips best to worst by how likely they are to stop a viewer
-scrolling.
+For each clip write copy in {language}: `viral_hook_text` (a scroll-stopping
+hook), `facebook_title` (title, no hashtags — the app appends five), a clean
+`youtube_title` of at most 100 characters with NO hashtags, a 250-500 character
+`youtube_description` with no hashtags, and exactly five comma-separated `tags`
+(lowercase, no #, the concrete subjects/actions/names of the moment). Order
+clips best to worst by how likely they are to stop a viewer scrolling.
 """
 
 
@@ -99,7 +103,7 @@ scrolling.
 class GroundedHook(BaseModel):
     on_screen: str
     viral_hook_text: str
-    video_title_for_youtube_short: str
+    youtube_title: str
 
 
 GROUNDED_HOOK_PROMPT = """
@@ -117,8 +121,8 @@ meaning is on the screen, not in the face.
    month", "3,400 stars") from the transcript or the current hook. Never a
    summary of the video's general topic, never a slogan that would fit any
    clip of this video, never drop a figure for a vaguer phrase.
-3. `video_title_for_youtube_short`: max 100 chars, same rule, in
-   TRANSCRIPT_LANGUAGE, no fake claims.
+3. `youtube_title`: max 100 chars, same rule, in TRANSCRIPT_LANGUAGE, no fake
+   claims, no hashtags.
 
 The current hook and title below were written WITHOUT seeing the frames and
 are the kind of topic summary you must replace. Do not reuse their wording.
@@ -130,7 +134,7 @@ TRANSCRIPT:
 {transcript}
 
 Return only:
-{{"on_screen": "<one line>", "viral_hook_text": "<max 10 words>", "video_title_for_youtube_short": "<max 100 chars>"}}
+{{"on_screen": "<one line>", "viral_hook_text": "<max 10 words>", "youtube_title": "<max 100 chars, no hashtags>"}}
 """
 
 
@@ -346,13 +350,17 @@ HOOK PLAYBOOK — pick the strongest fitting pattern for `viral_hook_text` (max 
   video ("I automated my clips with AI") is wrong. If nothing concrete can be
   named, quote the clip's strongest sentence instead of summarising the topic.
 
-COPY RULES — ALL text fields (descriptions, title, hook) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
-- Descriptions (TikTok + Instagram): 1-2 punchy sentences that tease the payoff
-  without spoiling it, then 3-5 topically relevant hashtags. No generic hashtag spam.
+COPY RULES — ALL text fields (facebook_title, youtube_title, youtube_description, viral_hook_text) MUST be written in TRANSCRIPT_LANGUAGE ({language}):
+- `facebook_title`: 1-2 punchy sentences that tease the payoff without
+  spoiling it. NO hashtags here: the app appends exactly five tags as hashtags
+  after two blank lines.
+- `youtube_title`: max 100 chars, curiosity-driven, NO hashtags (YouTube has a
+  separate hashtag field), no fake claims.
+- `youtube_description`: 250-500 characters, 2-4 plain sentences, no hashtags,
+  no timestamps, no emoji spam. Say what happens and why it is worth watching.
 - `tags`: exactly FIVE comma-separated tags in {language}: lowercase words, no
   `#`, naming the concrete subjects, tools, people, numbers or actions of THIS
   moment (not the whole video). Unique, no duplicates.
-- `video_title_for_youtube_short`: max 100 chars, curiosity-driven, no fake claims.
 - `predicted_score`: honest 0-100 estimate of viral potential.
 - `why`: one sentence, max 20 words, naming what makes THIS moment worth a
   clip — the specific hook, claim, number or payoff, not the topic.
@@ -370,9 +378,9 @@ Return only:
       "end": <number>,
       "source_window_id": "<window id>",
       "predicted_score": <integer 0-100>,
-      "video_description_for_tiktok": "<description + hashtags>",
-      "video_description_for_instagram": "<description + hashtags>",
-      "video_title_for_youtube_short": "<title max 100 chars>",
+      "facebook_title": "<post title, no hashtags>",
+      "youtube_title": "<clean title, max 100 chars, no hashtags>",
+      "youtube_description": "<250-500 characters, no hashtags>",
       "viral_hook_text": "<short overlay max 10 words>",
       "tags": "<five comma-separated tags>",
       "why": "<one sentence, max 20 words>"
@@ -418,12 +426,19 @@ def _escape_invalid_unicode_escapes(text: str) -> str:
     return "".join(chars)
 
 
-def _parse_json_response_text(text: str) -> dict:
+def _parse_json_response_text(text: str, provider: str = "AI provider") -> dict:
+    """Parse a JSON answer, naming the provider that actually produced it.
+
+    ``provider`` exists because every provider's answer is parsed here now.
+    The message used to say "Gemini" even when an OpenAI-compatible level
+    (OpenRouter, Ollama, …) returned the empty body, which pointed debugging
+    at a service that had never been called.
+    """
     if not text:
-        raise ValueError("Gemini returned an empty response body.")
+        raise ValueError(f"{provider} returned an empty response body.")
     candidate = _extract_json_candidate(text).replace("\x00", "").strip()
     if not candidate:
-        raise ValueError("Gemini response did not contain a JSON object.")
+        raise ValueError(f"{provider} response did not contain a JSON object.")
     parse_attempts = [candidate]
     sanitized_candidate = _escape_invalid_unicode_escapes(candidate)
     if sanitized_candidate != candidate:
@@ -434,7 +449,7 @@ def _parse_json_response_text(text: str) -> dict:
             return json.loads(parse_candidate)
         except json.JSONDecodeError as e:
             last_error = e
-    raise ValueError(f"Failed to parse Gemini JSON response: {last_error}")
+    raise ValueError(f"Failed to parse {provider} JSON response: {last_error}")
 
 
 def upload_media(client, path, mime_type=None):
@@ -639,7 +654,7 @@ def main() -> int:
     if parsed_obj is not None:
         parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
     else:
-        parsed = _parse_json_response_text(raw_text)
+        parsed = _parse_json_response_text(raw_text, provider=f"Gemini ({model_name})")
     result = {
         "mode": args.mode,
         "payload": parsed,

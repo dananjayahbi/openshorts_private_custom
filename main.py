@@ -31,6 +31,7 @@ import layout_picker
 import llm_backend
 import platform_compat
 import prompt_store
+import clip_copy
 import clip_tags
 import twitch_signals
 from clip_selection import (build_transcript_windows, clip_count_targets,
@@ -54,7 +55,7 @@ load_dotenv()
 ASPECT_RATIO = 9 / 16
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the MOST VIRAL moments for Facebook / YouTube Shorts — as many as the material genuinely holds, because an hours-long source can yield 100s of clips. Each clip must be between 15 and 60 seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
@@ -77,15 +78,15 @@ STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
 - No clips < 15 s or > 60 s.
 
-OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
+OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the Facebook title, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow). The app adds five hashtags after two blank lines:
 {{
   "shorts": [
     {{
       "start": <number in seconds, e.g., 12.340>,
       "end": <number in seconds, e.g., 37.900>,
-      "video_description_for_tiktok": "<description for TikTok oriented to get views>",
-      "video_description_for_instagram": "<description for Instagram oriented to get views>",
-      "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>",
+      "facebook_title": "<1-2 punchy sentences, no hashtags>",
+      "youtube_title": "<clean title, no hashtags, 100 chars max>",
+      "youtube_description": "<250-500 characters, no hashtags>",
       "viral_hook_text": "<SHORT punchy text overlay (max 10 words) with 1-2 fitting emojis. MUST BE IN THE SAME LANGUAGE AS THE VIDEO TRANSCRIPT. Examples: 'POV: You realized... 😳', 'Did you know? 🤯', 'Stop doing this! 🚫'>"
     }}
   ]
@@ -2050,20 +2051,27 @@ def _run_gemini_stage(client, model_name, prompt, schema):
             raise  # deterministic policy block — never retry
         except Exception as e:
             msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response',
-                # OpenAI-compatible servers: model still loading, busy, or a
-                # small model that skipped a required field this time.
-                'ConnectError', 'ReadTimeout', 'RemoteProtocolError', '502', '504',
-                'validation error'))
+            # The chain knows whether an error can succeed on a retry (a 429,
+            # a timed-out stream, a truncated body) or cannot (a 400, a
+            # content filter). Fall back to the historical token match for
+            # errors raised outside llm_backend (the Google SDK's own).
+            if isinstance(e, llm_backend.ProviderError):
+                transient = e.transient
+            else:
+                transient = any(tok in msg for tok in (
+                    '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
+                    '500', 'INTERNAL', 'overloaded', 'Deadline',
+                    'empty response body', 'did not contain a JSON object',
+                    'Failed to parse',
+                    # OpenAI-compatible servers: model still loading, busy, or a
+                    # small model that skipped a required field this time.
+                    'ConnectError', 'ReadTimeout', 'RemoteProtocolError', '502', '504',
+                    'validation error'))
             if attempt == max_attempts or not transient:
                 raise
             wait = 5 * (2 ** (attempt - 1))
             print(f"⚠️ AI provider transient error (attempt {attempt}/{max_attempts}), "
-                  f"retrying in {wait}s: {msg[:150]}")
+                  f"retrying in {wait}s: {type(e).__name__}: {msg[:300]}")
             time.sleep(wait)
 
 
@@ -2108,16 +2116,45 @@ def score_batch_size():
     return 3 if primary.get("provider") == "openai" else 8
 
 
-def _apply_clip_tags(shorts):
-    """Give every clip exactly five comma-separated tags (see clip_tags)."""
+def requested_clip_target():
+    """The user's explicit clip target, or None when they left it to the AI.
+
+    ``/api/process`` sets ``CLIP_TARGET_MIN`` and ``CLIP_TARGET_MAX`` to the
+    same number for an explicit target, so equality is the signal. The brake
+    (slow-lane free jobs) uses the same pair; its cap is a real ceiling and is
+    honoured here.
+    """
+    try:
+        low = int(os.environ.get("CLIP_TARGET_MIN", ""))
+        high = int(os.environ.get("CLIP_TARGET_MAX", ""))
+    except ValueError:
+        return None
+    return high if low == high and high > 0 else None
+
+
+def detail_window_batch():
+    """Windows per detail call.
+
+    One call over a 3-hour shortlist (100+ windows) does not fit a local
+    model's context, and asking for 100s of clips in one answer is a coin flip.
+    Gemini gets larger batches; OpenAI-compatible endpoints get small ones.
+    ``LLM_DETAIL_BATCH`` overrides both.
+    """
+    raw = os.environ.get("LLM_DETAIL_BATCH", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    primary = llm_backend.primary() or {}
+    return 4 if primary.get("provider") == "openai" else 16
+
+
+def _apply_clip_copy(shorts):
+    """Settle each clip's copy: Facebook post, clean YouTube title/description,
+    and exactly five comma-separated tags (see clip_copy)."""
     for clip in shorts or []:
-        clip["tags"] = clip_tags.five(
-            clip.get("tags"),
-            clip.get("video_title_for_youtube_short")
-            or clip.get("title") or clip.get("viral_hook_text"),
-            (clip.get("video_description_for_tiktok"),
-             clip.get("video_description_for_instagram")),
-        )
+        clip_copy.apply(clip)
     return shorts
 
 
@@ -2162,26 +2199,28 @@ def load_agent_plan(path, transcript, video_duration):
         snapped_start, snapped_end = snap_clip_to_words(
             start, end, words, video_duration,
             min_duration=1.0, max_duration=max(1.0, float(video_duration or end)))
-        title = (item.get('title') or item.get('video_title_for_youtube_short')
+        title = (item.get('youtube_title') or item.get('title')
+                 or item.get('video_title_for_youtube_short')
                  or f"Clip {index + 1}")
         hook = (item.get('hook') or item.get('viral_hook_text')
                 or item.get('title') or f"Clip {index + 1}")
-        description = (item.get('description')
+        description = (item.get('youtube_description') or item.get('description')
+                       or item.get('video_description_for_instagram')
                        or item.get('video_description_for_tiktok') or "")
         shorts.append({
             "start": round(float(snapped_start), 3),
             "end": round(float(snapped_end), 3),
             "source_window_id": f"agent_plan_{index + 1}",
             "predicted_score": item.get("score", 100),
-            "video_description_for_tiktok": description,
-            "video_description_for_instagram": (
-                item.get('video_description_for_instagram') or description),
-            "video_title_for_youtube_short": title,
+            "facebook_title": item.get("facebook_title") or title,
+            "youtube_title": title,
+            "youtube_description": description,
             "viral_hook_text": hook,
             "tags": clip_tags.five(item.get("tags"), title, (description,)),
             "why": item.get("why") or "Chosen by the agent from the transcript.",
             "proposed": [round(start, 3), round(end, 3)],
         })
+    _apply_clip_copy(shorts)
     print(f"🧭 Agent plan: {len(shorts)} clip(s), no model key needed.")
     return {"shorts": shorts}
 
@@ -2237,7 +2276,11 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         # each batch SELECT instead (the old "up to 3 per batch") capped the
         # shortlist at 3 * n_batches, under the target for any source shorter
         # than ~30 min. See clip_selection.score_batches.
-        target = shortlist_target(video_duration)
+        # The shortlist is the global top `target`, and its size scales with the
+        # source and with an explicit clip target: a 3-hour video is supposed to
+        # be able to yield 100s of clips, not the 10 windows this used to cap.
+        # The detail pass below sends it in batches, so one call stays small.
+        target = shortlist_target(video_duration, requested_clip_target())
         heat = twitch_signals.window_heat(windows, viewer_clips) if viewer_clips else {}
         if heat:
             print(f"   👀 Viewer clips fall in {len(heat)} window(s).")
@@ -2281,7 +2324,20 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
 
         # --- Pass 2: detailed clip extraction on the shortlist ---
+        # A long source now shortlists far more windows than one prompt can
+        # hold (and more clips than one answer should be asked for), so the
+        # shortlist is split into calls. Each call gets the band for the
+        # windows it was given; an explicit user target is divided across the
+        # calls so the floor is still reachable.
         min_clips, max_clips = clip_count_targets(len(shortlist))
+        requested = requested_clip_target()
+        DETAIL_BATCH = detail_window_batch()
+        batches = [shortlist[i:i + DETAIL_BATCH]
+                   for i in range(0, len(shortlist), DETAIL_BATCH)]
+        per_batch = math.ceil(requested / len(batches)) if requested else None
+        print(f"   Detail: {len(batches)} call(s) of up to {DETAIL_BATCH} "
+              f"window(s), aiming for "
+              f"{requested if requested else f'{min_clips}-{max_clips}'} clip(s).")
 
         def _detail_prompt_for(lo, hi):
             # A split batch keeps the full clip-count band: a short list can
@@ -2294,31 +2350,47 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                     windows_json=json.dumps(_payload(ws), ensure_ascii=False))
             return build
 
-        shorts = _run_stage_split(client, model_name, shortlist,
-                                  _detail_prompt_for(min_clips, max_clips),
-                                  gemini_worker.DetailResponse, "shorts", costs, "detail")
+        shorts = []
+        for batch in batches:
+            if per_batch:
+                lo, hi = max(1, per_batch), max(1, per_batch) * 2
+            else:
+                lo, hi = clip_count_targets(len(batch), respect_env=False)
+            shorts.extend(_run_stage_split(
+                client, model_name, batch, _detail_prompt_for(lo, hi),
+                gemini_worker.DetailResponse, "shorts", costs, "detail"))
 
         # The floor lived only in the prompt, and a prompt is not a contract:
         # the model regularly returned half of it and the job shipped that.
         # The windows it passed over are the cheap second chance — they are
-        # already the best-scoring ones in the video — so they get one more
-        # call for the missing clips. It may still come back empty, which is
-        # the honest answer for material that does not hold more.
+        # already the best-scoring ones in the video — so they get more calls
+        # for the missing clips. It may still come back empty, which is the
+        # honest answer for material that does not hold more.
         if len(shorts) < min_clips:
             used = {str(s.get("source_window_id") or "") for s in shorts}
             spare = [w for w in shortlist if w["id"] not in used]
             if spare:
                 missing = min_clips - len(shorts)
+                spare_batches = [spare[i:i + DETAIL_BATCH]
+                                 for i in range(0, len(spare), DETAIL_BATCH)]
                 print(f"   Detail returned {len(shorts)} clip(s) of {min_clips}; "
                       f"asking the {len(spare)} unused window(s) for {missing} more.")
-                extra = _run_stage_split(
-                    client, model_name, spare,
-                    _detail_prompt_for(missing, max(missing, len(spare))),
-                    gemini_worker.DetailResponse, "shorts", costs, "detail-floor")
-                if extra:
-                    shorts = sorted(shorts + extra,
-                                    key=lambda s: float(s.get("start") or 0))
-                    print(f"   Recovered {len(extra)} clip(s) from them.")
+                for batch in spare_batches:
+                    if requested:
+                        share = max(1, math.ceil(missing / len(spare_batches)))
+                        lo, hi = share, share * 2
+                    else:
+                        lo, hi = clip_count_targets(len(batch), respect_env=False)
+                    extra = _run_stage_split(
+                        client, model_name, batch, _detail_prompt_for(lo, hi),
+                        gemini_worker.DetailResponse, "shorts", costs, "detail-floor")
+                    if extra:
+                        shorts.extend(extra)
+                        missing = max(0, min_clips - len(shorts))
+                    if not missing:
+                        break
+                if len(shorts) > 0:
+                    print(f"   Recovered to {len(shorts)} clip(s).")
 
         if len(shorts) > max_clips:
             # By score, never by position: the results arrive in transcript
@@ -2342,7 +2414,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
             print(f"   Dropped {len(shorts) - len(deduped)} clip(s) overlapping a "
                   f"better-scored one.")
             shorts = deduped
-        _apply_clip_tags(shorts)
+        _apply_clip_copy(shorts)
 
         # Aggregate cost across both passes.
         cost_analysis = None
@@ -2369,7 +2441,7 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         print(f"🚫 {e}")
         raise
     except Exception as e:
-        print(f"❌ Gemini Error: {e}")
+        print(f"❌ AI provider error: {e}")
         return None
 
 
@@ -2556,8 +2628,9 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     model answer 400 INVALID_ARGUMENT, and a raw upload runs to hundreds of
     MB. A source longer than VISION_SEGMENT_SECONDS is watched stretch by
     stretch (``vision_segments``), and the picks are merged, de-overlapped
-    and cut to the best ``CLIP_TARGET_MAX`` by score: a silent multi-hour
-    console capture used to fail at the model."""
+    and kept: the user's clip target trims them by score, and with no target a
+    long silent source is no longer cut off at 15. A silent multi-hour console
+    capture used to fail at the model."""
     print("🎥  Silent video — analyzing with the configured vision provider (no transcript)...")
     has_gemini = bool(llm_backend.gemini_key())
     if not has_gemini and not llm_backend.vision_available():
@@ -2569,15 +2642,22 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     model_name = (llm_backend.gemini_model() if has_gemini
                   else llm_backend.primary_model_name())
 
-    # The vision path has no scoring windows to derive a count from, so the
-    # env targets (user request) apply directly over the classic 3-15.
+    # The vision path has no scoring windows to derive a count from, so an
+    # explicit target applies directly and there is no hard 15-clip default:
+    # each stretch asks for what that stretch can hold.
     def _env_int(name, default):
         try:
             return max(1, int(os.environ.get(name, "")))
         except ValueError:
             return default
+    requested = requested_clip_target()
     v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
-    v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
+    # A ceiling set without an exact target (the slow-lane brake, an A/B run)
+    # still trims the merged picks; no env value means no global ceiling.
+    try:
+        v_ceiling = max(1, int(os.environ.get("CLIP_TARGET_MAX", "")))
+    except ValueError:
+        v_ceiling = requested
     v_min_secs, v_max_secs = clip_duration_bounds()
 
     segments = vision_segments(video_duration, VISION_SEGMENT_SECONDS, VISION_MAX_SEGMENTS)
@@ -2603,9 +2683,16 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
                 proxy = os.path.join(tmp_dir, f"part{i}.mp4")
                 try:
                     _vision_proxy(video_path, s0, s1, proxy)
+                    if requested:
+                        seg_max = max(per_min, math.ceil(requested / len(segments)) * 2)
+                    else:
+                        # No target: let the stretch's own length decide how
+                        # many moments it may hold (about one per 15 s, plus
+                        # a little room), instead of a fixed 15 for the video.
+                        seg_max = max(per_min, int((s1 - s0) // 15) + 2)
                     shorts, cost = _visual_pass(
                         client, model_name, proxy, round(s1 - s0, 3), language,
-                        per_min, v_max_clips, v_min_secs, v_max_secs,
+                        per_min, seg_max, v_min_secs, v_max_secs,
                         hint=_viewer_hint(viewer_clips, s0, s1 - s0))
                 except gemini_worker.GeminiBlockedError:
                     raise
@@ -2625,8 +2712,10 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         clean.sort(key=lambda c: c["start"])
-        clean = trim_to_best(dedupe_overlapping(clean), v_max_clips)
-        _apply_clip_tags(clean)
+        clean = dedupe_overlapping(clean)
+        if v_ceiling:
+            clean = trim_to_best(clean, v_ceiling)
+        _apply_clip_copy(clean)
 
         if not clean:
             print("⚠️ Vision pass returned no usable clips.")
@@ -3010,7 +3099,7 @@ if __name__ == '__main__':
                 start = clip['start']
                 end = clip['end']
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
-                print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
+                print(f"   Title: {clip_copy.youtube_title(clip) or 'No Title'}")
 
                 clip_filename = f"{video_title}_clip_{i+1}.mp4"
                 clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")

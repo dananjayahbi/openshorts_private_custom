@@ -261,3 +261,194 @@ class TestSettingsApi:
         cfg = client.get("/api/config").json()
         assert cfg["llmConfigured"] is True
         assert "secret-key" not in json.dumps(cfg)
+
+
+class TestProviderDiagnostics:
+    """A failed provider must say which one failed and why.
+
+    Prod 15-nov-2026: OpenRouter's `openrouter/free` alias answered 200 with an
+    empty body after ~4 minutes and the log said "Gemini returned an empty
+    response body" — the parse error came from gemini_worker, so the only clue
+    pointed at a service that was never called.
+    """
+
+    def _transport(self, monkeypatch, responder):
+        def client_factory(**kwargs):
+            class T(httpx.BaseTransport):
+                def handle_request(self, request):
+                    return responder(request)
+            return httpx.Client(transport=T(), **kwargs)
+        monkeypatch.setattr(llm_backend, "_client", client_factory)
+
+    def test_empty_body_names_the_real_provider_and_finish_reason(self, monkeypatch):
+        llm_backend.save_levels(_levels({
+            "base_url": "http://or.test/v1", "model": "openrouter/free"}))
+        self._transport(monkeypatch, lambda request: httpx.Response(200, json={
+            "model": "nvidia/nemotron:free",
+            "provider": "Nvidia",
+            "choices": [{
+                "message": {"role": "assistant", "content": None,
+                            "reasoning": "I should answer with JSON..."},
+                "finish_reason": "length",
+            }],
+            "usage": {"completion_tokens": 4096,
+                      "completion_tokens_details": {"reasoning_tokens": 4096}},
+        }))
+        with pytest.raises(llm_backend.ProviderError) as exc:
+            llm_backend.generate_json("p", gemini_worker.ScoreResponse)
+        message = str(exc.value)
+        assert "AI provider returned an empty response body" in message
+        assert "openrouter/free" in message
+        assert "served by Nvidia nvidia/nemotron:free" in message
+        assert "finish_reason=length" in message
+        assert "Gemini" not in message
+        assert exc.value.provider == "openai"
+        assert exc.value.finish_reason == "length"
+        assert exc.value.transient is True
+
+    def test_answer_left_in_the_reasoning_channel_is_recovered(self, monkeypatch):
+        """A reasoning model that writes the JSON into `reasoning` still has
+        the answer; throwing away a five-minute generation helps nobody."""
+        llm_backend.save_levels(_levels({"base_url": "http://or.test/v1"}))
+        self._transport(monkeypatch, lambda request: httpx.Response(200, json={
+            "choices": [{
+                "message": {"content": "",
+                            "reasoning": 'Plan: return the object.\n{"windows": []}'},
+                "finish_reason": "stop",
+            }],
+        }))
+        parsed, _cost = llm_backend.generate_json(
+            "p", gemini_worker.ScoreResponse)
+        assert parsed == {"windows": []}
+
+    def test_a_streamed_answer_is_consumed(self, monkeypatch):
+        llm_backend.save_levels(_levels({
+            "base_url": "http://or.test/v1", "model": "openrouter/free"}))
+        seen = {}
+
+        def responder(request):
+            body = json.loads(request.content)
+            seen["stream"] = body["stream"]
+            chunks = [
+                {"provider": "TestProvider", "model": "test/served",
+                 "choices": [{"index": 0,
+                              "delta": {"role": "assistant", "content": ""}}]},
+                {"choices": [{"index": 0,
+                              "delta": {"content": '{"windows": '}}]},
+                {"choices": [{"index": 0, "delta": {"content": "[]}"}}]},
+                {"choices": [{"index": 0, "delta": {},
+                              "finish_reason": "stop"}]},
+            ]
+            text = "\n\n".join("data: " + json.dumps(c) for c in chunks)
+            text += "\n\ndata: [DONE]\n\n"
+            return httpx.Response(200, text=text, headers={
+                "content-type": "text/event-stream"})
+
+        self._transport(monkeypatch, responder)
+        parsed, cost = llm_backend.generate_json(
+            "p", gemini_worker.ScoreResponse)
+        assert parsed == {"windows": []}
+        assert seen["stream"] is True
+        assert cost["model"] == "test/served"
+
+    def test_streaming_can_be_turned_off(self, monkeypatch):
+        monkeypatch.setenv("LLM_STREAM", "0")
+        llm_backend.save_levels(_levels({"base_url": "http://or.test/v1"}))
+        seen = {}
+        self._transport(monkeypatch, lambda request: (
+            seen.update(stream=json.loads(request.content)["stream"]),
+            _completion({"windows": []}))[1])
+        llm_backend.generate_json("p", gemini_worker.ScoreResponse)
+        assert seen["stream"] is False
+
+    def test_a_server_that_rejects_stream_options_gets_a_second_chance(
+            self, monkeypatch):
+        """Some OpenAI-compatible servers 400 on stream_options. That is not
+        the model failing; retry the same format without it."""
+        llm_backend.save_levels(_levels({"base_url": "http://local.test/v1"}))
+        seen = {"bodies": []}
+
+        def responder(request):
+            body = json.loads(request.content)
+            seen["bodies"].append(body)
+            if "stream_options" in body:
+                return httpx.Response(
+                    400, text="Unrecognized request argument: stream_options")
+            chunks = [
+                {"choices": [{"index": 0, "delta": {"content": '{"windows": []}'}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                text="\n\n".join("data: " + json.dumps(c) for c in chunks)
+                + "\n\ndata: [DONE]\n\n")
+
+        self._transport(monkeypatch, responder)
+        parsed, _ = llm_backend.generate_json("p", gemini_worker.ScoreResponse)
+        assert parsed == {"windows": []}
+        assert [("stream_options" in b) for b in seen["bodies"]] == [True, False]
+
+    def test_transient_flag_follows_the_status_code(self, monkeypatch):
+        llm_backend.save_levels(_levels({"base_url": "http://or.test/v1"}))
+        self._transport(monkeypatch, lambda request: httpx.Response(
+            503, text="busy"))
+        with pytest.raises(llm_backend.ProviderError) as exc:
+            llm_backend.generate_json("p", gemini_worker.ScoreResponse)
+        assert exc.value.transient is True
+        assert exc.value.status == 503
+
+        self._transport(monkeypatch, lambda request: httpx.Response(
+            400, text="invalid api key"))
+        with pytest.raises(llm_backend.ProviderError) as exc:
+            llm_backend.generate_json("p", gemini_worker.ScoreResponse)
+        assert exc.value.transient is False
+        assert exc.value.status == 400
+
+    def test_a_length_truncation_is_not_retried(self, monkeypatch):
+        """A fixed model that spent the whole budget reasoning will do it
+        again; the stage should fail fast instead of paying three 5-minute
+        calls."""
+        main = pytest.importorskip("main")
+        monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+        calls = {"n": 0}
+
+        def fake_generate(prompt, schema, model=None):
+            calls["n"] += 1
+            raise llm_backend.ProviderError(
+                "AI provider returned an empty response body",
+                provider="openai", model="m", finish_reason="length",
+                transient=llm_backend._repeatable("length", "llama3.1:8b"))
+
+        monkeypatch.setattr(llm_backend, "generate_json", fake_generate)
+        with pytest.raises(llm_backend.ProviderError):
+            main._run_gemini_stage(None, "m", "p", gemini_worker.ScoreResponse)
+        assert calls["n"] == 1
+
+    def test_the_parser_names_the_provider_it_was_given(self):
+        with pytest.raises(ValueError) as exc:
+            gemini_worker._parse_json_response_text("", provider="openai · m")
+        assert str(exc.value) == "openai · m returned an empty response body."
+        with pytest.raises(ValueError) as exc:
+            gemini_worker._parse_json_response_text("")
+        assert str(exc.value) == "AI provider returned an empty response body."
+
+
+def test_reasoning_effort_is_opt_in_and_openrouter_only(monkeypatch):
+    """A reasoning model that spends its whole budget thinking is the empty
+    body we saw in prod; this knob shrinks that budget, but only on OpenRouter
+    (other servers 400 on unknown fields) and only when asked for."""
+    level = {"base_url": "https://openrouter.ai/api/v1"}
+    monkeypatch.delenv("LLM_REASONING_EFFORT", raising=False)
+    assert llm_backend._reasoning_extra(level) == {}
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "low")
+    assert llm_backend._reasoning_extra(level) == {"reasoning": {"effort": "low"}}
+    assert llm_backend._reasoning_extra({"base_url": "http://local.test/v1"}) == {}
+
+
+def test_a_budget_cut_is_only_retried_when_the_model_can_change():
+    assert llm_backend._repeatable("length", "llama3.1:8b") is False
+    assert llm_backend._repeatable("length", "openrouter/free") is True
+    assert llm_backend._repeatable("length", "openrouter/auto") is True
+    assert llm_backend._repeatable("content_filter", "openrouter/free") is False
+    assert llm_backend._repeatable("stop", "llama3.1:8b") is True
+    assert llm_backend._repeatable(None, "llama3.1:8b") is True

@@ -57,8 +57,8 @@ SPECS: List[dict] = [
         "placeholders": ["video_duration", "language", "min_clips", "max_clips",
                          "min_secs", "max_secs", "windows_json"],
         "description": (
-            "Turns the shortlist into final clips and writes the hook, YouTube "
-            "title and TikTok/Instagram captions."
+            "Turns the shortlist into final clips and writes the hook, the "
+            "Facebook post, the YouTube title/description and the five tags."
         ),
     },
     {

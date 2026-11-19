@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 import httpx
+import clip_copy
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import and_, delete, func, select, update
@@ -385,9 +386,8 @@ async def _upload_clip(profile: str, file_path: str, clip: dict, platforms: List
     """Schedule one clip on Upload-Post. Mirrors app.post_to_socials' payload."""
     loop = asyncio.get_event_loop()
     content = await loop.run_in_executor(None, _read_bytes, file_path)
-    title = clip.get("video_title_for_youtube_short") or clip.get("title") or "New short"
-    description = (clip.get("video_description_for_instagram")
-                   or clip.get("video_description_for_tiktok") or title)
+    title = clip_copy.youtube_title(clip) or clip.get("title") or "New short"
+    description = clip_copy.youtube_description(clip) or clip_copy.facebook_title(clip) or title
     data = {
         "user": profile,
         "title": title,

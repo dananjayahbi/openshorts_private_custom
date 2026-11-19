@@ -1,3 +1,7 @@
+// LEGACY, no longer rendered: the queue now drives the ordinary single-video
+// screen (see App.jsx runBatchRows) instead of this per-video terminal. Kept
+// because test_job_cancel/test_shell_scroll still read it as a contract of the
+// old cancel wiring; remove it together with those checks.
 import React, { useEffect, useMemo, useState } from 'react';
 import {
     AlertTriangle, CheckCircle2, ChevronDown, Clock, ExternalLink, LayoutGrid,

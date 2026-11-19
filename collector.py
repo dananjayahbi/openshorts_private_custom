@@ -17,6 +17,7 @@ pass the mount's allowlist, so ``items.json`` is not public.
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -259,7 +260,7 @@ def add_upload(filename, upload_file, max_bytes, duration_probe, thumb_probe):
     ``upload_file`` is FastAPI's ``UploadFile`` (read in chunks, never loaded
     whole); ``duration_probe(path)`` and ``thumb_probe(path, thumb_path)`` are
     the ffprobe/ffmpeg helpers owned by app.py, so this module stays free of
-    process spawning.
+    process spawning. ``max_bytes=None`` means no size ceiling.
     """
     item_id = str(uuid.uuid4())
     base = os.path.basename(filename or "video.mp4")
@@ -277,7 +278,7 @@ def add_upload(filename, upload_file, max_bytes, duration_probe, thumb_probe):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > max_bytes:
+                if max_bytes is not None and size > max_bytes:
                     raise ValueError(f"File too large. Max size {max_bytes // (1024 * 1024)}MB")
                 out.write(chunk)
         if size == 0:
@@ -301,6 +302,59 @@ def add_upload(filename, upload_file, max_bytes, duration_probe, thumb_probe):
         "duration": duration,
         "thumbnail": f"/collector/thumbs/{thumb_name}" if os.path.exists(
             os.path.join(THUMBS_DIR, thumb_name)) else None,
+        "file": f"files/{name}",
+        "size_bytes": size,
+        "state": "ready",
+        "queued": False,
+        "added_at": time.time(),
+        "downloaded_at": time.time(),
+    }
+    with _lock:
+        items = _read()
+        items.append(item)
+        _write(items)
+    return public(item)
+
+
+def add_file(path, title, source_url=None, channel=None,
+             duration_probe=None, thumb_probe=None, move=False):
+    """Ingest an existing video file as a ready Collector item.
+
+    Used by the Download Manager when it turns a downloaded source into
+    chunks. ``move=False`` copies (keeping the original), which is what the
+    whole-source case needs; chunk files are moved so the temp tree can be
+    removed afterwards. ``duration_probe``/``thumb_probe`` are app.py's ffprobe
+    and ffmpeg helpers, passed in so this module stays free of process
+    spawning.
+    """
+    if not path or not os.path.isfile(path):
+        raise ValueError("Video file not found")
+    item_id = str(uuid.uuid4())
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _VIDEO_EXT:
+        ext = ".mp4"
+    name = f"{item_id}_{_slug(title)}{ext}"
+    dest = os.path.join(FILES_DIR, name)
+    os.makedirs(FILES_DIR, exist_ok=True)
+    if move:
+        shutil.move(path, dest)
+    else:
+        shutil.copy2(path, dest)
+    size = os.path.getsize(dest)
+    duration = duration_probe(dest) if duration_probe else None
+    thumb_name = f"{item_id}.jpg"
+    thumb_path = os.path.join(THUMBS_DIR, thumb_name)
+    if thumb_probe:
+        thumb_probe(dest, thumb_path)
+    item = {
+        "id": item_id,
+        "source": "download",
+        "url": source_url,
+        "title": title or os.path.splitext(os.path.basename(path))[0] or "Untitled",
+        "channel": channel,
+        "duration": duration,
+        "thumbnail": (f"/collector/thumbs/{thumb_name}"
+                      if os.path.exists(thumb_path) else None),
         "file": f"files/{name}",
         "size_bytes": size,
         "state": "ready",

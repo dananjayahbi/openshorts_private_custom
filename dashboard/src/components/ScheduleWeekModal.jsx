@@ -4,6 +4,7 @@ import { apiFetch } from '../lib/api';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
 import TikTokDraftNotice from './TikTokDraftNotice';
+import { youtubeTitle, youtubeDescription, facebookTitle } from '../lib/clipCopy';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -139,8 +140,8 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
                 api_key: uploadPostKey,
                 user_id: uploadUserId,
                 platforms: selectedPlatforms,
-                title: clip.video_title_for_youtube_short || 'Viral Short',
-                description: clip.video_description_for_instagram || clip.video_description_for_tiktok || '',
+                title: youtubeTitle(clip) || 'Viral Short',
+                description: youtubeDescription(clip) || facebookTitle(clip) || '',
                 scheduled_date: scheduledDate,
                 timezone
             };
@@ -298,7 +299,7 @@ export default function ScheduleWeekModal({ isOpen, onClose, clips, jobId, uploa
 
                         <div className="flex-1 min-w-0">
                             <div className="text-xs text-ink truncate">
-                                {clip.video_title_for_youtube_short || 'Viral Short'}
+                                {youtubeTitle(clip) || 'Viral Short'}
                             </div>
                             <div className="readout mt-0.5 truncate">
                                 {time} · {TIMEZONES.find(t => t.value === timezone)?.label || timezone}

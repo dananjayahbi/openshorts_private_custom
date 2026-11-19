@@ -47,13 +47,19 @@ def test_playground_exposes_the_full_caption_editor_and_saves_a_profile():
     assert "layout" in page
 
 
-def test_manual_caption_panel_is_visible_before_a_render():
+def test_generator_offers_a_style_profile_instead_of_the_caption_editor():
     media = _read("components", "MediaInput.jsx")
     # Visible without opening advanced: a profile choice + captions toggle.
     assert "style profile" in media
+    assert "auto · current defaults" in media
     assert "burn captions into the clips" in media
     assert "/api/style-profiles" in media
-    assert "CaptionControls" in media and "CaptionStage" in media
+    # The full caption editor lives on the Playground / Style Profiles page;
+    # the generator only picks a profile (the task: hide captions & styles in
+    # advanced and prioritise auto/current defaults).
+    assert "CaptionControls" not in media and "CaptionStage" not in media
+    assert "captions &amp; style" not in media
+    assert "Style Profiles" in media
     # The look and the profile id travel with the request.
     assert "captionStyle" in media and "styleProfileId" in media
     assert "captions: captionsOn" in media

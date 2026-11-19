@@ -30,6 +30,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 import mcp_ui
+import clip_copy
 from subtitles import CAPTION_PRESETS, line_budget
 
 router = APIRouter()
@@ -137,10 +138,11 @@ TOOLS = [
                     "description": "Set true to proceed after a needs_confirmation low-resolution warning.",
                 },
                 "target_clips": {
-                    "type": "integer", "minimum": 1, "maximum": 15,
+                    "type": "integer", "minimum": 1,
                     "description": "How many clips to aim for. A target, not a guarantee: "
                                    "fewer come back when the material doesn't hold them. "
-                                   "Default: the AI decides (usually 2-6).",
+                                   "No upper limit — an hours-long source can yield 100s of "
+                                   "clips. Omit to let the AI decide from the material.",
                 },
                 "clip_min_seconds": {
                     "type": "number", "minimum": 5, "maximum": 175,
@@ -162,7 +164,8 @@ TOOLS = [
             "an upload_url: send the file's raw bytes to it with an HTTP PUT "
             "(for example `curl -T video.mp4 <upload_url>`), then call "
             "process_video with the returned upload_id. Unused slots are "
-            "deleted after expires_in seconds (6 h); max size is max_mb. "
+            "deleted after expires_in seconds (6 h); max_mb is null when the "
+            "slot accepts a file of any size. "
             "If the upload_url cannot be reached from where you run, the user "
             "can run the curl command themselves or share a public link to "
             "the video instead."
@@ -397,7 +400,7 @@ TOOLS = [
                             "end": {"type": "number", "description": "Seconds in the SOURCE video."},
                             "title": {"type": "string"},
                             "hook": {"type": "string", "description": "First-seconds overlay text."},
-                            "description": {"type": "string", "description": "TikTok/IG caption."},
+                            "description": {"type": "string", "description": "YouTube description (also the Facebook post body)."},
                             "score": {"type": "number"},
                         },
                         "required": ["start", "end"],
@@ -693,15 +696,15 @@ def _clip_summaries(job_id, result):
         rel = clip.get("video_url") or ""
         out.append({
             "index": i,
-            "title": clip.get("title") or clip.get("video_title_for_youtube_short"),
+            "title": clip_copy.youtube_title(clip) or clip.get("title"),
             "duration_seconds": (round(clip["end"] - clip["start"], 1)
                                  if isinstance(clip.get("start"), (int, float))
                                  and isinstance(clip.get("end"), (int, float)) else None),
             "video_url": _clip_url(base, rel),
             "source_segments": _source_segments(clip),
-            "youtube_title": clip.get("video_title_for_youtube_short"),
-            "tiktok_description": clip.get("video_description_for_tiktok"),
-            "instagram_description": clip.get("video_description_for_instagram"),
+            "facebook_title": clip_copy.facebook_title(clip),
+            "youtube_title": clip_copy.youtube_title(clip),
+            "youtube_description": clip_copy.youtube_description(clip),
             "tags": clip.get("tags") or "",
         })
     return out

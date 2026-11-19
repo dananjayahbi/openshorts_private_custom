@@ -63,6 +63,11 @@ def _classify_failure(err: str) -> str:
     # content-shaped like the policy block above, not an outage.
     if "did not return usable clips" in e or "clip detection failed" in e:
         return "no clips found (user video)"
+    # The provider chain (Settings → AI providers): any vendor. Named before
+    # "gemini" so a message that still mentions Gemini inside an "AI provider"
+    # error is not reported as a Google outage.
+    if "ai provider" in e or "llm server" in e:
+        return "ai provider"
     if "gemini" in e or "google.genai" in e:
         return "gemini"
     if "ffmpeg" in e or "reframe" in e:

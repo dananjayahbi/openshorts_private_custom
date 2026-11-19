@@ -51,7 +51,7 @@ export default function StyleProfiles({ onUse, onEdit, onCreate }) {
             <div className="w-full p-3 sm:p-6">
                 <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
                     <div>
-                        <p className="eyebrow mb-1.5">05 · STYLE PROFILES</p>
+                        <p className="eyebrow mb-1.5">06 · STYLE PROFILES</p>
                         <h1 className="font-display lowercase text-2xl text-ink">style profiles</h1>
                         <p className="text-sm text-muted mt-1.5 max-w-2xl">
                             Saved caption looks and output shapes. Pick one in the Clip Generator,

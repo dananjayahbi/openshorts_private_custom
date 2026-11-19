@@ -60,10 +60,10 @@ anonymous: there is no minute quota to enforce.
 
 ## The choices the API cannot make for you
 
-**How many clips.** Leave `target_clips` unset by default: the AI decides, and
-most videos yield two to six. It is a target (1-15), not a guarantee. Asking a
-short video for 15 clips does not produce 15 good ones, it produces the same
-handful plus filler.
+**How many clips.** Leave `target_clips` unset by default: the AI decides from
+the material. It is a target (>= 1, no upper limit), not a guarantee — an
+hours-long source can legitimately yield 100s of clips, while asking a short
+video for many produces the same handful plus filler.
 
 **Clip length.** `clip_min_seconds` / `clip_max_seconds` default to 15 and 60,
 which is what the platforms reward. The max must sit at least 5 seconds above

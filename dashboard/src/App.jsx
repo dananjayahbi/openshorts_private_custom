@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers, FlaskConical, Palette } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers, FlaskConical, Palette, Archive as ArchiveIcon } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import SettingsPage from './components/SettingsPage';
 import Collector from './components/Collector';
-import BatchQueue from './components/BatchQueue';
+import DownloadManager from './components/DownloadManager';
+import Archive from './components/Archive';
 import McpConnectCard from './components/McpConnectCard';
 import ResultCard from './components/ResultCard';
 import HomeDashboard from './components/HomeDashboard';
@@ -35,6 +36,8 @@ import { track } from './lib/analytics';
 import { readConnectReturn, stripConnectReturn } from './lib/connectReturn';
 import { rememberTabAfterLogin } from './lib/tabAfterLogin';
 import { JobPollError, pollFailureAction } from './lib/jobPoll';
+import { pathForTab, tabFromPath, normalizeTab, pageTitle } from './lib/routes';
+import { youtubeTitle } from './lib/clipCopy';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -403,9 +406,35 @@ function App() {
   // two loops over the same videos (duplicate jobs, the same item processed
   // twice). This is the guard the state alone cannot provide.
   const batchRunRef = useRef(false);
-  const [activeTab, setActiveTab] = useState('home'); // home, dashboard, gallery, collector, playground, profiles, ai-agent, thumbnails, settings
+  const [activeTab, setActiveTab] = useState(() => tabFromPath(window.location.pathname)); // see lib/routes.js
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
+
+  // --- Pages, not tabs -----------------------------------------------------
+  // The URL decides which page is open: every nav item has its own path
+  // (lib/routes.js), so a link can be shared, a reload stays on the page and
+  // Back/Forward walk the pages the user visited. `activeTab` remains the id
+  // the views below render from.
+  useEffect(() => {
+    const onPopState = () => setActiveTab(tabFromPath(window.location.pathname));
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  // Keep the address bar and the title in step with the page actually open.
+  // setActiveTab is called from many deep flows (restoring a project, finishing
+  // the tutorial, a job that vanished), and none of them may leave a stale path
+  // behind. replaceState, not pushState: those flows are consequences of the
+  // page the user is already on, not new destinations to go Back to.
+  useEffect(() => {
+    const path = pathForTab(activeTab);
+    if (window.location.pathname !== path) {
+      try {
+        window.history.replaceState(null, '', path + window.location.search + window.location.hash);
+      } catch (_) { /* ignore */ }
+    }
+    document.title = pageTitle(activeTab);
+  }, [activeTab]);
   // Reopened-project state (paid mode): per-clip {index, server_file, active_layers}
   // restored from the backend so ResultCards resume editing where they left off.
   const [projectState, setProjectState] = useState(null);
@@ -634,7 +663,7 @@ function App() {
     setProcessingMedia(null);
     setQualityGate(null);
     setStatus('complete');
-    setActiveTab('dashboard');
+    goToTab('dashboard');
   };
 
   // Apply one subtitle style to every clip of the job, sequentially.
@@ -730,7 +759,11 @@ function App() {
         else if (!session.noSource) setProcessingMedia({ type: 'server', payload: `/api/source/${session.jobId}` });
         if (session.noSource) setNoSource(true);
         if (session.projectState) setProjectState(session.projectState);
-        if (session.activeTab) setActiveTab(session.activeTab);
+        // Only when no page was asked for: a link to /settings must open
+        // Settings, not the tab this browser happened to leave open last time.
+        if (session.activeTab && window.location.pathname === '/') {
+          setActiveTab(normalizeTab(session.activeTab));
+        }
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
         setSessionRecovered(true);
@@ -849,6 +882,9 @@ function App() {
   useEffect(() => {
     let interval;
     let failures = 0;
+    // The queue loop drives the same state itself (waitForJob); letting this
+    // poller run too would double-poll one job and race the queue handoff.
+    if (batchRunRef.current) return undefined;
     if ((status === 'processing' || status === 'completed') && jobId) {
       interval = setInterval(async () => {
         try {
@@ -904,7 +940,7 @@ function App() {
             handleResetRef.current();
             setSessionRecovered(false);
             setJobGone(true);
-            if (historyAvailableRef.current) setActiveTab('history');
+            if (historyAvailableRef.current) setActiveTab('gallery');
           }
         }
       }, 2000);
@@ -1008,29 +1044,31 @@ function App() {
     if (tutorialLock && activeTab !== 'dashboard') setActiveTab('dashboard');
   }, [tutorialLock, activeTab]);
 
-  // Deep links into a tab: #app?tab=history (the clips-ready email, an old
-  // link that now means the Clip Gallery), #app?tab=autopilot (Autopilot
-  // emails, the social connect page's return URL). Read once per hash change,
-  // then the query is dropped so a reload does not keep forcing the tab.
+  // Old deep links into a tab: #app?tab=history (the clips-ready email, an old
+  // link that now means the Clip Gallery), #app?tab=thumbnails, ... They now
+  // resolve to the page's own path, so the address bar shows the same URL the
+  // nav links to, and the hash query is dropped so a reload does not keep
+  // forcing the page.
   const [autopilotConnected, setAutopilotConnected] = useState(null); // connect outcome, see lib/connectReturn.js
   useEffect(() => {
     // 'history' is the pre-redesign name of the Clip Gallery: emails already
     // sent still point at it, so it is accepted and mapped, not ignored.
-    const DEEP_LINK_TABS = ['home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'collector', 'ai-agent', 'history'];
+    const DEEP_LINK_TABS = ['history', 'home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'collector', 'downloads', 'ai-agent'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
       const params = new URLSearchParams(hash.slice(5));
       const tab = params.get('tab');
       if (!tab || !DEEP_LINK_TABS.includes(tab)) return;  // e.g. #app?tutorial=1
-      setActiveTab(tab === 'history' ? 'gallery' : tab);
+      const target = normalizeTab(tab);
+      setActiveTab(target);
       // The connect outcome rides in the query string, not in the hash
       // (lib/connectReturn.js): a cancel also comes back with connected=1.
       if (tab === 'autopilot' && params.get('connected') === '1') {
         setAutopilotConnected(readConnectReturn(window.location.search));
       }
       try {
-        window.history.replaceState(null, '', `${window.location.pathname}${stripConnectReturn(window.location.search)}#app`);
+        window.history.replaceState(null, '', pathForTab(target) + stripConnectReturn(window.location.search));
       } catch (_) { /* ignore */ }
     };
     apply();
@@ -1051,7 +1089,7 @@ function App() {
     const hash = window.location.hash || '';
     if (!hash.startsWith('#app?') || new URLSearchParams(hash.slice(5)).get('checkout') !== 'cancel') return;
     track('CheckoutCanceled', { props: { back_to: 'app' } });
-    try { window.history.replaceState(null, '', '#app'); } catch (_) { /* ignore */ }
+    try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) { /* ignore */ }
   }, []);
 
   // #app?login=1: the "Log in" link of the site nav (seo/nav.js). Opens the
@@ -1071,7 +1109,7 @@ function App() {
     if (!loginRequested || authLoading) return;
     setLoginRequested(false);
     if (billingEnabled && !isSignedIn) setShowLogin(true);
-    try { window.history.replaceState(null, '', '#app'); } catch (_) { /* ignore */ }
+    try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) { /* ignore */ }
   }, [loginRequested, authLoading, billingEnabled, isSignedIn]);
 
   useEffect(() => {
@@ -1375,9 +1413,11 @@ function App() {
     return 'timeout';
   };
 
-  // Run a subset of the batch's rows, one video at a time, patching the live
-  // rows: used by the first pass and by "retry failed" (which keeps the rows
-  // that already succeeded instead of starting a new batch).
+  // Run a subset of the queue one video at a time, driving the SAME state the
+  // single-video flow uses: status, jobId, logs, results. The queue therefore
+  // renders the ordinary processing/results screen instead of a second UI, with
+  // a slim progress bar above it. Between videos the previous job is cleared
+  // and the log says the environment is being prepared for the next one.
   const runBatchRows = async (items, options, indices) => {
     const patch = (index, fields) => setBatch((current) => {
       if (!current) return current;
@@ -1385,12 +1425,40 @@ function App() {
       nextRows[index] = { ...nextRows[index], ...fields };
       return { ...current, rows: nextRows };
     });
+    const labelOf = (item) => item.label || item.payload?.name
+      || (item.type === 'url' ? item.payload : item.type === 'collector' ? 'collector video' : 'video');
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let cancelled = false;
 
-    for (const i of indices) {
+    for (const [position, i] of indices.entries()) {
       if (batchCancelRef.current) {
         patch(i, { state: 'cancelled', finishedAt: Date.now() });
         continue;
       }
+      const item = items[i];
+      const label = labelOf(item);
+      // --- Clean environment for this video (the single flow's start state) ---
+      setStatus('processing');
+      setJobId(null);
+      setResults(null);
+      setPartialJob(null);
+      setFirstVideoJob(false);
+      setProjectState(null);
+      setNoSource(false);
+      setQueueInfo(null);
+      setJobError('');
+      setQualityGate(null);
+      setBulkSub({ running: false, current: 0, total: 0, errors: 0 });
+      // The first video starts like a normal run; every later one says what the
+      // queue is doing, so the screen never looks stuck on the old job.
+      setLogs(position === 0 ? ['Starting process...'] : [
+        'Preparing the environment for the next video…',
+        `Next: ${label}`,
+      ]);
+      setLogTimes(position === 0 ? [Date.now() / 1000] : [Date.now() / 1000, Date.now() / 1000]);
+      setProcessingMedia(
+        (item.type === 'thumbnail_session' || item.type === 'collector') ? null : item,
+      );
       patch(i, {
         state: 'submitting',
         jobId: null,
@@ -1404,7 +1472,7 @@ function App() {
       let lastStatus = '';
       try {
         const data = {
-          ...items[i],
+          ...item,
           ...options,
           acknowledged: options.acknowledged !== false,
         };
@@ -1413,47 +1481,86 @@ function App() {
         if (!res.ok) throw new Error(await errorText(res));
         const payload = await res.json();
         if (payload.needs_confirmation) {
-          patch(i, {
-            state: 'failed',
-            finishedAt: Date.now(),
-            error: 'Resolution too low — run it alone to confirm.',
-          });
+          const reason = 'Resolution too low — run it alone to confirm.';
+          patch(i, { state: 'failed', finishedAt: Date.now(), error: reason });
+          setStatus('error');
+          setJobError(reason);
+          await sleep(1500);
           continue;
         }
+        setJobId(payload.job_id);
+        setPartialJob(payload.partial || null);
+        setFirstVideoJob(!!payload.first_video);
+        if (item.type === 'thumbnail_session' || item.type === 'collector') {
+          setProcessingMedia({ type: 'server', payload: `/api/source/${payload.job_id}` });
+        }
+        refreshMe();
         patch(i, { state: 'running', jobId: payload.job_id });
         // Stop clicked while this video was being submitted: end it as soon
         // as it exists instead of leaving it to run behind the queue.
         if (batchCancelRef.current) {
-          try { await cancelServerJob(payload.job_id); } catch { /* row says so */ }
+          try { await cancelServerJob(payload.job_id); } catch { /* banner says so */ }
           patch(i, { state: 'cancelled', finishedAt: Date.now() });
-          continue;
+          cancelled = true;
+          break;
         }
         const final = await waitForJob(payload.job_id, (state) => {
           lastStatus = String(state.status || '').toLowerCase();
           lastLogs = Array.isArray(state.logs) ? state.logs : lastLogs;
+          // Exactly what the single-job poller writes, so the log tail, clip
+          // cards and queue position all behave the same way.
+          if (state.result) setResults(state.result);
+          if (state.partial) setPartialJob(state.partial);
+          if (state.logs) {
+            setLogs(state.logs);
+            setLogTimes(Array.isArray(state.log_times) ? state.log_times : []);
+          }
+          setQueueInfo(state.status === 'queued' && state.queue ? state.queue : null);
           patch(i, {
             logs: lastLogs,
             logTimes: Array.isArray(state.log_times) ? state.log_times : [],
             progress: state.progress ?? null,
           });
         });
+        setQueueInfo(null);
         if (final === 'completed') {
           patch(i, { state: 'done', finishedAt: Date.now() });
+          setStatus('complete');
+          // The clips are already on disk, where the gallery reads them.
+          setLogs((prev) => [...prev, '✓ Clips saved to the gallery. Preparing the environment for the next video…']);
+          await sleep(1500);
         } else if (final === 'cancelled') {
           patch(i, { state: 'cancelled', finishedAt: Date.now() });
+          cancelled = true;
+          break;
         } else {
           // The server's own error line is the useful one; a bare "job failed"
           // made a provider error indistinguishable from a bad source file.
           const tail = [...lastLogs].reverse().find((line) => line && String(line).trim());
-          patch(i, {
-            state: 'failed',
-            finishedAt: Date.now(),
-            error: tail ? String(tail).slice(0, 300) : `job ${final}${lastStatus ? ` (${lastStatus})` : ''}`,
-          });
+          const error = tail ? String(tail).slice(0, 300)
+            : `job ${final}${lastStatus ? ` (${lastStatus})` : ''}`;
+          patch(i, { state: 'failed', finishedAt: Date.now(), error });
+          setStatus('error');
+          setJobError(error);
+          await sleep(1200);
         }
       } catch (e) {
-        patch(i, { state: 'failed', finishedAt: Date.now(), error: String(e.message || e).slice(0, 300) });
+        const error = String(e.message || e).slice(0, 300);
+        patch(i, { state: 'failed', finishedAt: Date.now(), error });
+        setStatus('error');
+        setJobError(error);
+        await sleep(1200);
       }
+    }
+
+    if (cancelled || batchCancelRef.current) {
+      setStatus('idle');
+      setJobId(null);
+      setResults(null);
+      setLogs([]);
+      setLogTimes([]);
+      setProcessingMedia(null);
+      setStopNotice('Queue stopped. Clips that already finished are in the gallery.');
     }
     setBatch((current) => (current ? { ...current, running: false } : current));
     refreshMe();
@@ -1631,6 +1738,13 @@ function App() {
 
   const handleReset = () => {
     setJobGone(false);
+    // "new" during a queue means stop the queue: the loop would otherwise
+    // submit its next video over the fresh generator.
+    if (batchRunRef.current) {
+      batchCancelRef.current = true;
+      if (jobId) cancelServerJob(jobId).catch(() => {});
+    }
+    setBatch(null);
     // Flush any pending edit-state sync before dropping the project: the clips
     // themselves are already archived to R2 as they were edited.
     flushClipState();
@@ -1656,7 +1770,8 @@ function App() {
 
   // One nav definition drives all three surfaces: the top rail, the mobile
   // drawer, and the bottom tab bar. `short` is the tab-bar label — the full one
-  // wraps to two lines in a 5-up bar on a 360px phone.
+  // wraps to two lines in a 5-up bar on a 360px phone. Each `id` also names a
+  // real page in lib/routes.js: goToTab pushes that page's path.
   //
   // Trimmed to what this fork actually uses: Home, Clip Generator, Clip
   // Gallery, AI Agent, YouTube Studio, Settings. AI Shorts, UGC, Autopilot,
@@ -1666,14 +1781,26 @@ function App() {
     { id: 'home', ord: '00', icon: Home, label: 'Home', short: 'home', primary: true },
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
-    { id: 'collector', ord: '03', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
-    { id: 'playground', ord: '04', icon: FlaskConical, label: 'Playground', short: 'play' },
-    { id: 'profiles', ord: '05', icon: Palette, label: 'Style Profiles', short: 'styles' },
-    { id: 'ai-agent', ord: '06', icon: Bot, label: 'AI Agent', short: 'agent' },
-    { id: 'thumbnails', ord: '07', icon: Image, label: 'YouTube Studio', short: 'studio' },
-    { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'archive', ord: '03', icon: ArchiveIcon, label: 'Archive', short: 'archive' },
+    { id: 'collector', ord: '04', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
+    { id: 'downloads', ord: '04', icon: Download, label: 'Download Manager', short: 'downloads' },
+    { id: 'playground', ord: '05', icon: FlaskConical, label: 'Playground', short: 'play' },
+    { id: 'profiles', ord: '06', icon: Palette, label: 'Style Profiles', short: 'styles' },
+    { id: 'ai-agent', ord: '07', icon: Bot, label: 'AI Agent', short: 'agent' },
+    { id: 'thumbnails', ord: '08', icon: Image, label: 'YouTube Studio', short: 'studio' },
+    { id: 'settings', ord: '09', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
+
+  // The queue's slim progress line above the ordinary single-video screen.
+  const queueDone = batch
+    ? batch.rows.filter((r) => ['done', 'failed', 'cancelled'].includes(r.state)).length
+    : 0;
+  const queueFailed = batch
+    ? batch.rows.filter((r) => r.state === 'failed' || r.state === 'cancelled').length
+    : 0;
+  const queueCurrent = batch?.rows.find((r) => r.state === 'running' || r.state === 'submitting');
+
 
   // Escape closes the mobile drawer. The shell itself is overflow-hidden, so
   // there is no body scroll to lock behind it.
@@ -1684,10 +1811,21 @@ function App() {
     return () => document.removeEventListener('keydown', onKey);
   }, [navOpen]);
 
-  const goToTab = (id) => {
+  // Navigating is what changes the URL: pushState gives each page its own
+  // history entry, so Back returns to the previous page instead of leaving the
+  // app. The tab lock (first-run tutorial) still refuses other pages.
+  const goToTab = (id, { replace = false } = {}) => {
     if (tutorialLock && id !== 'dashboard') return;
     setActiveTab(id);
     setNavOpen(false);
+    const path = pathForTab(id);
+    if (window.location.pathname !== path) {
+      try {
+        window.history[replace ? 'replaceState' : 'pushState'](
+          null, '', path + window.location.search + window.location.hash,
+        );
+      } catch (_) { /* ignore */ }
+    }
   };
   const tabLocked = (id) => tutorialLock && id !== 'dashboard';
 
@@ -1702,8 +1840,8 @@ function App() {
   const TopBar = () => (
     <header className="h-14 shrink-0 border-b border-rule bg-paper2/70 backdrop-blur supports-[backdrop-filter]:bg-paper2/60 flex items-center gap-1.5 sm:gap-2 px-2 sm:px-4 z-30">
       <a
-        href="#app"
-        onClick={() => goToTab('home')}
+        href={pathForTab('home')}
+        onClick={(e) => { e.preventDefault(); goToTab('home'); }}
         className="flex items-center gap-2.5 pr-2 shrink-0"
         title="Clip Studio home"
       >
@@ -1785,7 +1923,11 @@ function App() {
       />
       <div className="relative w-[17rem] max-w-[82vw] h-full bg-paper2 border-r border-rule flex flex-col animate-slide-in-left">
         <div className="flex items-center justify-between px-5 h-14 border-b border-rule shrink-0">
-          <a href="#app" className="flex items-center gap-2.5" onClick={() => goToTab('dashboard')}>
+          <a
+            href={pathForTab('dashboard')}
+            className="flex items-center gap-2.5"
+            onClick={(e) => { e.preventDefault(); goToTab('dashboard'); }}
+          >
             <div className="w-7 h-7 bg-paper3 rounded-input overflow-hidden border border-rule shrink-0">
               <img src="/favicon.svg" alt="" className="w-full h-full object-cover" />
             </div>
@@ -1949,15 +2091,47 @@ function App() {
         {/* Advanced tools (AI Shorts, AI Agent): BYOK fal.ai + ElevenLabs notice. */}
         {advancedThisTab && <AdvancedBanner needsPlan={needsPlan} onKeys={() => goToTab('settings')} />}
 
+        {/* Queue progress: a slim line above the ordinary single-video screen.
+            The queue uses the same processing/results view as a manual run. */}
+        {activeTab === 'dashboard' && batch && (
+          <div className="mx-3 sm:mx-6 mt-3 px-3.5 sm:px-4 py-2.5 bg-paper2 border border-rule rounded-card flex flex-wrap items-center gap-2 sm:gap-3 shrink-0 animate-fade">
+            <span className="readout shrink-0">queue</span>
+            <span className="text-sm text-ink2 min-w-0 flex-1 truncate">
+              {queueDone}/{batch.rows.length} done
+              {queueCurrent ? ` · ${queueCurrent.label}`
+                : batch.running ? ' · preparing next video…' : ' · finished'}
+            </span>
+            {batch.running ? (
+              <button onClick={stopBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
+                stop queue
+              </button>
+            ) : (
+              <>
+                {queueFailed > 0 && (
+                  <button onClick={retryFailedBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
+                    retry failed ({queueFailed})
+                  </button>
+                )}
+                <button
+                  onClick={() => { setBatch(null); setStatus('idle'); }}
+                  className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+                >
+                  dismiss
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
 
           {/* View: Home */}
           {activeTab === 'home' && (
             <HomeDashboard
-              onStartClip={(url) => { setActiveTab('dashboard'); handleProcess({ type: 'url', payload: url }); }}
-              onOpenGallery={() => setActiveTab('gallery')}
-              onOpenClips={() => setActiveTab('dashboard')}
+              onStartClip={(url) => { goToTab('dashboard'); handleProcess({ type: 'url', payload: url }); }}
+              onOpenGallery={() => goToTab('gallery')}
+              onOpenClips={() => goToTab('dashboard')}
             />
           )}
 
@@ -1979,7 +2153,7 @@ function App() {
 
                 <div className="space-y-3">
                   <p className="eyebrow flex items-center gap-2">
-                    <Bot size={12} /> 06 · AI AGENT
+                    <Bot size={12} /> 07 · AI AGENT
                   </p>
                   <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
                     Your agent drives the pipeline
@@ -2046,9 +2220,12 @@ function App() {
               and the infinite-scroll observer never saw its sentinel. */}
           {activeTab === 'gallery' && (
             <div className="h-full animate-fade">
-              <Gallery />
+              <Gallery onOpenArchive={() => goToTab('archive')} />
             </div>
           )}
+
+          {/* View: Archive — permanent clips and the external vaults they live in */}
+          {activeTab === 'archive' && <Archive onOpenGallery={() => goToTab('gallery')} />}
 
           {/* View: YouTube Studio (thumbnail studio) */}
           {activeTab === 'thumbnails' && (
@@ -2059,7 +2236,7 @@ function App() {
               uploadUserId={uploadUserId}
               managed={isManaged}
               onCreateClips={(sessionId) => {
-                setActiveTab('dashboard');
+                goToTab('dashboard');
                 // The Studio source is the user's own upload, published to their
                 // own channel; the handover carries that same attestation.
                 handleProcess({ type: 'thumbnail_session', payload: sessionId, acknowledged: true });
@@ -2073,6 +2250,11 @@ function App() {
               onProcessItem={processCollectorItem}
               onProcessQueue={processCollectorQueue}
             />
+          )}
+
+          {/* View: Download Manager — full sources in temp, split into the shelf */}
+          {activeTab === 'downloads' && (
+            <DownloadManager onOpenCollector={() => goToTab('collector')} />
           )}
 
           {/* View: Playground — caption/output styles before a render */}
@@ -2092,19 +2274,8 @@ function App() {
             />
           )}
 
-          {/* View: Bulk mode progress — replaces the single-video view */}
-          {activeTab === 'dashboard' && batch && (
-            <BatchQueue
-              batch={batch}
-              onCancel={stopBatch}
-              onOpenGallery={() => goToTab('gallery')}
-              onRetryFailed={retryFailedBatch}
-              onDismiss={() => { setBatch(null); setStatus('idle'); }}
-            />
-          )}
-
           {/* View: Dashboard (Idle) */}
-          {activeTab === 'dashboard' && !batch && status === 'idle' && (
+          {activeTab === 'dashboard' && status === 'idle' && (
             <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar animate-fade">
               <div className="min-h-full flex flex-col items-center justify-center px-4 py-5 sm:p-6">
               {stopNotice && (
@@ -2139,7 +2310,7 @@ function App() {
                   <p className="text-xs text-muted">
                     Or let an agent do it:{' '}
                     <a
-                      href={billingEnabled ? '#/account' : '#app'}
+                      href={billingEnabled ? '#/account' : pathForTab('settings')}
                       onClick={(e) => { if (!billingEnabled) { e.preventDefault(); goToTab('settings'); } }}
                       className="text-ink2 underline underline-offset-2 hover:text-brass transition-colors"
                     >
@@ -2170,7 +2341,7 @@ function App() {
           )}
 
           {/* View: Processing / Results (Split View) */}
-          {activeTab === 'dashboard' && !batch && (status === 'processing' || status === 'complete' || status === 'error') && (
+          {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
             <div className="h-full flex flex-col md:flex-row gap-3 md:gap-4 p-3 md:p-4 overflow-y-auto md:overflow-y-hidden overscroll-contain custom-scrollbar animate-fade">
 
               {/* Left Panel: Preview & Status */}
@@ -2579,7 +2750,7 @@ function App() {
         <ClipEditor
           jobId={jobId}
           clipIndex={editingClip}
-          clipTitle={results.clips[editingClip].video_title_for_youtube_short || ''}
+          clipTitle={youtubeTitle(results.clips[editingClip])}
           onClose={() => setEditingClip(null)}
           onRerendered={handleClipRerendered}
         />
@@ -2588,7 +2759,7 @@ function App() {
         <ReframeEditor
           jobId={jobId}
           clipIndex={reframingClip}
-          clipTitle={results.clips[reframingClip].video_title_for_youtube_short || ''}
+          clipTitle={youtubeTitle(results.clips[reframingClip])}
           onClose={() => setReframingClip(null)}
           onReframed={handleClipRerendered}
         />

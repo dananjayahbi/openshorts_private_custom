@@ -38,7 +38,8 @@ _RULES = [
     # Live transcription progress emitted by transcribe_backends.
     (re.compile(r'Transcribing… (\d+)%'), '🎙️ Transcribing audio… {0}%', 'asr'),
     (re.compile(r'Transcribing (video|audio)'), '🎙️ Transcribing audio…', 'asr'),
-    (re.compile(r'Analyzing with (?:Gemini|local LLM)'), '🤖 Finding the best moments…', None),
+    # Both the pre-chain ("Gemini"/"local LLM") and the chain-era line.
+    (re.compile(r'Analyzing with'), '🤖 Finding the best moments…', None),
     (re.compile(r'Silent video — analyzing'), '🎥 No speech — finding moments in the picture…', None),
     (re.compile(r'Choosing a layout'), '🎛️ Choosing the layout…', None),
     (re.compile(r'Found (\d+) (?:viral )?clips'), '🔥 Found {0} clips!', None),

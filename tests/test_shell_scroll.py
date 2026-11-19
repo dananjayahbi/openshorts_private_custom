@@ -35,7 +35,7 @@ def test_gallery_is_not_wrapped_in_a_second_scroller():
     view = app.split("{activeTab === 'gallery' && (", 1)[1].split(")}", 1)[0]
     # <Gallery/> owns its own h-full overflow-y-auto: the wrapper must not.
     assert "overflow-y-auto" not in view
-    assert "<Gallery />" in view
+    assert "<Gallery" in view
 
 
 def test_settings_scroller_is_full_width():
@@ -51,7 +51,8 @@ def test_settings_scroller_is_full_width():
 def test_every_page_pane_contains_its_overscroll():
     """Chained scrolling is what makes an inner pane feel like a broken page."""
     for name in ("components/Gallery.jsx", "components/HomeDashboard.jsx",
-                 "components/Collector.jsx", "components/ThumbnailStudio.jsx",
+                 "components/Collector.jsx", "components/DownloadManager.jsx",
+                 "components/ThumbnailStudio.jsx", "components/Archive.jsx",
                  "components/BatchQueue.jsx", "components/Playground.jsx",
                  "components/StyleProfiles.jsx", "components/SettingsPage.jsx"):
         assert "overscroll-contain" in _read(name), name

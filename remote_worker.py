@@ -536,8 +536,9 @@ def clean_metadata(path):
                 if isinstance(value, str) and len(value) > MAX_TEXT:
                     clip[key] = value[:MAX_TEXT]
                 elif key in ("title", "video_title_for_youtube_short", "description",
+                             "facebook_title", "youtube_title", "youtube_description",
                              "video_description_for_tiktok", "video_description_for_instagram",
-                             "hook", "why") and value is not None and not isinstance(value, str):
+                             "hook", "why", "tags") and value is not None and not isinstance(value, str):
                     clip[key] = str(value)[:MAX_TEXT]
             recipe = clip.get("recipe")
             if isinstance(recipe, dict):

@@ -22,7 +22,13 @@ Two invariants keep that chain from leaking:
   worse than a short list.
 
 `target_clips` on `/api/process` (dashboard: advanced options) pins both ends via
-`CLIP_TARGET_MIN` / `CLIP_TARGET_MAX` when the user wants an exact number.
+`CLIP_TARGET_MIN` / `CLIP_TARGET_MAX` when the user wants an exact number. There
+is no 15-clip ceiling: a target also widens `shortlist_target` (about two
+candidate windows per requested clip), and the detail pass sends the shortlist
+in `detail_window_batch()` calls (16 windows for Gemini, 4 for an
+OpenAI-compatible server, `LLM_DETAIL_BATCH` overrides). Each call gets the band
+for its own windows — or a share of the user's target — so an hours-long source
+can return 100s of clips without one absurdly long answer.
 
 ## Silent footage: the vision fallback (`main.get_visual_clips`)
 
@@ -36,7 +42,8 @@ them.
 The vision pass uploads the video, Gemini returns the same `{"shorts"}` shape
 (`gemini_worker.VisualResponse`) in the same 15-60 s band, so every later stage
 is identical. `CLIP_TARGET_MIN`/`MAX` apply directly (there are no scoring
-windows). The transcript is stored as `{"language": "none", "segments": []}`, so
+windows); with no explicit target each stretch asks for about one moment per
+15 seconds of its own length, and the merged picks are not cut off at 15. The transcript is stored as `{"language": "none", "segments": []}`, so
 the clips have no subtitles, which is correct.
 
 **This is the one stage that sends Gemini the video instead of frames, on
@@ -46,8 +53,9 @@ window. A source longer than `VISION_SEGMENT_SECONDS` (2400) is therefore split 
 `clip_selection.vision_segments` into near-equal stretches (no one-minute tail),
 each re-encoded to a 360p / 1 fps proxy (`_vision_proxy`: re-encoded, not
 stream-copied, or every timestamp would be off by up to a GOP), watched on its
-own, offset back to source time, then merged with `dedupe_overlapping` +
-`trim_to_best` to `CLIP_TARGET_MAX`. One failed stretch is logged and skipped.
+own, offset back to source time, then merged with `dedupe_overlapping` (and
+`trim_to_best` only when the user asked for a specific number). One failed
+stretch is logged and skipped.
 `VISION_MAX_SEGMENTS` (8, ~5 h 20) bounds the spend of one job; past it only the
 first stretches are watched. A source that fits one stretch is one stretch: it
 goes through the same proxy, never as the raw file (a broken capture, such as an

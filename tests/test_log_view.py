@@ -34,6 +34,17 @@ def test_real_job_produces_clean_user_view():
     ]
 
 
+def test_chain_era_analysis_line_is_still_friendly():
+    """The provider chain renamed the old 'Analyzing with Gemini' line; cloud
+    users must not lose the stage from their progress view."""
+    assert friendly_log_line(
+        "🤖  Analyzing with the configured AI chain "
+        "(2-pass: score → detail; first provider: openrouter/free)...") == \
+        "🤖 Finding the best moments…"
+    assert friendly_log_line("🤖  Analyzing with Gemini (2-pass: score → detail)...") == \
+        "🤖 Finding the best moments…"
+
+
 def test_no_paths_ever_leak():
     for line in friendly_logs(RAW_JOB):
         assert "output/" not in line

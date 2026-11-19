@@ -15,13 +15,14 @@ from . import database, storage, metering
 from .models import UserVideo, Subscription, Project, User, ClipExpiryWarning
 from .auth import get_current_user_required
 
+import clip_copy
 import watermarked
 
 router = APIRouter()
 
 
 def _clip_title(clip) -> str:
-    return clip.get("title") or clip.get("video_title_for_youtube_short") or "Short"
+    return clip_copy.youtube_title(clip) or clip.get("title") or "Short"
 
 
 _HOOK_CHAIN_RE = re.compile(r'^subtitled_\d+_((?:hooked_\d+_|hook_).+)$')

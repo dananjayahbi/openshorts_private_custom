@@ -159,8 +159,10 @@ soup — use rounded-card/rounded-input/rounded-full deliberately. No
 
 ## Functional contract (NEVER break)
 
-Hash routing (`#app`, `#/pricing`, `#/account`, `#legal`, `#features`,
-`#how-it-works`, `#pricing`, `#comparison`, `#faq` anchors), `billingEnabled` /
+Path routing for the app's pages (`/clip-generator`, `/clip-gallery`, `/shelf`,
+`/settings`, ... see `dashboard/src/lib/routes.js`) with the legacy hash entry
+points (`#app`, `#/pricing`, `#/account`, `#app?tab=…`, `#legal`, `#features`,
+`#how-it-works`, `#pricing`, `#comparison`, `#faq` anchors) still resolving, `billingEnabled` /
 `isManaged` / `isSignedIn` gating, all handlers and props, localStorage keys
 (`gemini_key`, `uploadPostKey_v3`, `elevenLabsKey_v1`, `falKey_v1`,
 `uploadUserId`, `openshorts_session`, `openshorts_auth`,

@@ -25,7 +25,11 @@ def test_a_card_is_a_still_not_a_video():
     assert "<img" in card
     assert "clip.poster" in card
     assert "loading=\"lazy\"" in card
-    assert "aspect-square" in card
+    # The tile keeps the clip's own aspect ratio instead of cropping the frame
+    # into a square; the API sends the poster's size for that.
+    assert "aspectRatio" in card
+    assert "clip.poster_width" in card and "clip.poster_height" in card
+    assert "aspect-square bg-black" not in card
 
 
 def test_the_home_page_tiles_are_stills_too():
@@ -142,6 +146,44 @@ def test_a_locked_file_is_explained_in_the_dialog():
     assert "still open" in gallery
     # The message lands in the dialog, not only in the page banner.
     assert "error" in modal and "role=\"alert\"" in modal
+
+
+def test_archiving_releases_the_open_player_first():
+    modal = _read("components", "ClipModal.jsx")
+    # Issue #8: the modal's own <video> held the MP4 open, so the rename
+    # behind archive failed. The player is torn down before the PATCH.
+    assert "videoRef" in modal
+    assert "ref={videoRef}" in modal
+    assert "releasePlayer" in modal
+    assert "removeAttribute('src')" in modal
+    assert "video.load()" in modal
+    assert "toggleArchive" in modal
+    assert "await releasePlayer()" in modal
+    assert "RELEASE_PLAYER_MS" in modal
+    # The raw JSON body ("{detail: ...}") is no longer shown to the user.
+    assert "await res.text()" not in modal
+    assert "readError" in modal
+
+
+def test_bulk_archive_is_wired_for_the_selection():
+    gallery = _read("components", "Gallery.jsx")
+    assert "/api/archive/clips" in gallery
+    assert "archiveSelected" in gallery
+    assert "archive ({selected.size})" in gallery
+    # Only the selected refs are sent, never the whole library.
+    assert "clips: targets.map" in gallery
+
+
+def test_single_platform_groups_have_their_own_staged_buttons():
+    gallery = _read("components", "Gallery.jsx")
+    assert "/api/gallery/archive-staged" in gallery
+    assert "archiveStagedGroup('youtube')" in gallery
+    assert "archiveStagedGroup('facebook')" in gallery
+    assert "archive yt-only" in gallery
+    assert "archive fb-only" in gallery
+    assert "staged.youtube" in gallery and "staged.facebook" in gallery
+    # The auto-archive delay is shown next to the staged group.
+    assert "auto-archive after" in gallery
 
 
 def test_no_inline_metadata_wall_on_the_card():

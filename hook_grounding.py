@@ -135,7 +135,7 @@ def _ask_gemini(frames, prompt, api_key=None):
 
 
 def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
-    """Rewrite ``clip['viral_hook_text']`` / ``video_title_for_youtube_short``
+    """Rewrite ``clip['viral_hook_text']`` / ``clip['youtube_title']``
     in place from the clip's frames. Returns what changed (also stored under
     ``clip['hook_grounding']``), or None when skipped or failed."""
     import llm_backend
@@ -156,18 +156,23 @@ def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
         prompt = prompt_store.render(
             "hook_grounding", language=language,
             current_hook=clip.get("viral_hook_text") or "",
-            current_title=clip.get("video_title_for_youtube_short") or "",
+            current_title=clip.get("youtube_title")
+            or clip.get("video_title_for_youtube_short") or "",
             transcript=clip_words(transcript, start, end)[:4000] or "(no speech)")
         answer = _ask_gemini(frames, prompt, api_key)
         hook = str(answer.get("viral_hook_text") or "").strip()
-        title = str(answer.get("video_title_for_youtube_short") or "").strip()
+        title = str(answer.get("youtube_title") or "").strip()
         if not hook:
             return None
         before = {"viral_hook_text": clip.get("viral_hook_text"),
-                  "video_title_for_youtube_short": clip.get("video_title_for_youtube_short")}
+                  "youtube_title": clip.get("youtube_title")}
         clip["viral_hook_text"] = hook
         if title:
-            clip["video_title_for_youtube_short"] = title[:100]
+            clip["youtube_title"] = title[:100]
+            # The Facebook post was built from the old title: rebuild the copy
+            # around the grounded title, keeping the five tags.
+            import clip_copy
+            clip_copy.apply(clip)
         clip["hook_grounding"] = {
             "on_screen": str(answer.get("on_screen") or "")[:200],
             "before": before,
