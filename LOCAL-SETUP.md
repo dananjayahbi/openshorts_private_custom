@@ -141,6 +141,28 @@ them. A failed link becomes an error item (with the reason) instead of failing
 the batch; a failed split goes back to **ready to split** with the ffmpeg error.
 Deleting is refused while an item is queued, downloading or splitting.
 
+## Streamed videos: the streamer split
+
+On the Clip Generator, a single video can be toggled **streamed video** (bulk /
+queue runs do not offer it). A button opens a modal that plays the original
+source at its true aspect ratio; drag a box over the streamer's webcam/section.
+The box is locked to 9:16, can be moved and resized, and is saved as fractions
+of the source frame.
+
+- A local upload plays straight from the browser. A Collector item plays its
+  downloaded copy. A link is downloaded into the Collector first and then
+  reused by the job (`POST /api/streamer/prepare`), so it is not fetched twice.
+- The render composes two 1080x960 halves: the marked streamer crop (fill +
+  centre crop) on top, the normal 9:16 reframe fitted over a blurred copy of
+  itself on the bottom. The viral clip's audio is kept.
+- Captions/hooks are burned after composition, so their style and position do
+  not change. The AI prompts are told the source is a stream (streamer
+  reactions matter, not long gameplay stretches).
+- If the box is invalid, not 9:16 on that source, or the composition fails, the
+  normal reframed clip is kept and the reason appears in the job log.
+
+Details: `docs/architecture/streamer-mode.md`.
+
 ## Archive: permanent clips and external storage vaults
 
 `/archive` (nav **Archive**) is the permanent home for clips you are done with.

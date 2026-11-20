@@ -148,6 +148,22 @@ class TestGenerateAss:
         active = next(l for l in content.splitlines() if l.startswith("Style: Active,"))
         assert active.split(",")[3] == "&H00000000"
 
+    def test_streamer_seam_anchors_every_event_on_the_split_line(self, tmp_path):
+        # PlayRes is 384x288: a 16:9 streamer box leaves the seam at ~31.6%,
+        # i.e. y=91, and x=192 is the horizontal centre.
+        content = self._render(tmp_path, seam_share=0.31640625)
+        events = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+        assert len(events) == 3
+        assert all("{\\an5\\pos(192,91)}" in e for e in events)
+        # Without a streamer seam the style's own position rules untouched.
+        assert "\\pos(" not in self._render(tmp_path)
+
+    def test_split_ranges_still_anchor_on_the_frame_middle(self, tmp_path):
+        content = self._render(tmp_path, split_ranges=[(0.0, 10.0)])
+        events = [l for l in content.splitlines() if l.startswith("Dialogue:")]
+        assert all("{\\an5}" in e for e in events)
+        assert "\\pos(" not in content
+
     def test_reveal_hides_words_not_spoken_yet(self, tmp_path):
         content = self._render(tmp_path, reveal=True)
         events = [l for l in content.splitlines() if l.startswith("Dialogue:")]

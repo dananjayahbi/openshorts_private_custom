@@ -12,6 +12,7 @@ import collector
 import downloads
 import clip_state
 import archive
+import streamer_layout
 import re
 import sys
 import uuid
@@ -1705,12 +1706,14 @@ def _reapply_captions(job_id, clip_index, video_path):
             transcript = _words_transcript(clip['caption_words'],
                                            transcript.get('language', 'en'))
             start, end = 0.0, transcript['segments'][0]['end']
+        seam = _streamer_caption_seam(clip)
         if clip.get('caption_style'):
             return _restyle_captions(video_path, transcript, start, end,
                                      clip['caption_style'],
-                                     clip.get('layout_ranges'))
+                                     clip.get('layout_ranges'), seam_share=seam)
         import main as _main
-        return _main.auto_caption_clip(video_path, transcript, start, end)
+        return _main.auto_caption_clip(video_path, transcript, start, end,
+                                       seam_share=seam)
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
@@ -1741,10 +1744,13 @@ def _words_transcript(words, language="en"):
 
 
 def _burn_caption_style(video_path, out_path, sub_path, transcript, start, end,
-                        style, split_ranges=None):
+                        style, split_ranges=None, seam_share=None):
     """Generate the caption file for ``style`` (CAPTION_STYLE_FIELDS, a
     missing field takes the SubtitleRequest default) and burn it onto
-    ``video_path``. Returns False when no words fall in the range."""
+    ``video_path``. Returns False when no words fall in the range.
+
+    ``seam_share`` anchors every caption on the streamer split line (the ASS
+    path only; SRT carries one alignment for the whole file)."""
     s = {k: SubtitleRequest.model_fields[k].default for k in CAPTION_STYLE_FIELDS}
     s.update({k: v for k, v in (style or {}).items() if k in s})
     max_chars = (max(1, min(40, int(s["max_chars"])))
@@ -1753,7 +1759,7 @@ def _burn_caption_style(video_path, out_path, sub_path, transcript, start, end,
                     if s["max_duration"] is not None else None)
     if s["style"] == "karaoke":
         opts = dict(
-            split_ranges=split_ranges,
+            split_ranges=split_ranges, seam_share=seam_share,
             alignment=s["position"], fontsize=s["font_size"],
             font_name=s["font_name"], font_color=s["font_color"],
             border_color=s["border_color"], border_width=s["border_width"],
@@ -1779,11 +1785,27 @@ def _burn_caption_style(video_path, out_path, sub_path, transcript, start, end,
     return True
 
 
+def _streamer_caption_seam(clip):
+    """0..1 split line recorded on a streamer clip, or None.
+
+    ``main`` writes ``streamer.caption_seam`` from the marked box's aspect, so
+    every caption path (job, restyle, hook/edit re-burn, /api/subtitle) can put
+    the text back on the same seam after the compose.
+    """
+    streamer = (clip or {}).get('streamer') or {}
+    try:
+        seam = float(streamer.get('caption_seam'))
+    except (TypeError, ValueError):
+        return None
+    return seam if 0.05 <= seam <= 0.95 else None
+
+
 def _restyle_captions(video_path, transcript, start, end, style,
-                      layout=None):
+                      layout=None, seam_share=None):
     """Burn a recorded caption style next to ``video_path`` with the naming
     auto_caption_clip uses (``subtitled_<ts>_<file>``, so the walk-backs find
-    the clean file). Returns the captioned path, or None (no words, failure)."""
+    the clean file). Returns the captioned path, or None (no words, failure).
+    ``seam_share`` keeps streamer clips' text on their split line."""
     output_dir = os.path.dirname(video_path)
     generation_id = int(time.time())
     karaoke = (style or {}).get("style") == "karaoke"
@@ -1797,7 +1819,8 @@ def _restyle_captions(video_path, transcript, start, end, style,
     seams = layout_ranges.split_ranges(layout or layout_ranges.read(video_path))
     try:
         if not _burn_caption_style(video_path, out_path, sub_path, transcript,
-                                   start, end, style, seams):
+                                   start, end, style, seams,
+                                   seam_share=seam_share):
             return None
         return out_path
     except Exception as e:
@@ -1813,7 +1836,8 @@ def _recut_captioner(clip):
     if not style:
         return None
     return lambda path, transcript, start, end: _restyle_captions(
-        path, transcript, start, end, style)
+        path, transcript, start, end, style,
+        seam_share=_streamer_caption_seam(clip))
 
 
 def _recover_jobs_from_disk():
@@ -5916,6 +5940,59 @@ async def collector_remove(item_id: str):
     return {"deleted": item_id}
 
 
+# --- Streamer marker: a local copy of a link, to draw the streamer box on ----
+@app.post("/api/streamer/prepare")
+async def streamer_prepare(request: Request):
+    """Find or download a local copy of ``url`` for the marker modal.
+
+    The marker needs real frames, and a link has none until it is downloaded.
+    Reusing the Collector means the copy is not thrown away: the yes/no answer
+    carries the collector id, and the job can process that item directly
+    instead of downloading the same source a second time.
+    """
+    body = await _request_json(request)
+    url = str(body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Paste a video link first.")
+
+    items = await asyncio.to_thread(collector.list_items)
+    existing = next((item for item in items if item.get("url") == url), None)
+    if existing is None:
+        try:
+            existing = await asyncio.to_thread(collector.add_url, url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:  # provider/network failure
+            raise HTTPException(status_code=502, detail=f"Could not read that link: {e}")
+
+    if not existing.get("ready") and existing.get("state") != "downloading":
+        existing = await asyncio.to_thread(collector.start_download, existing["id"])
+    return {
+        "collector_id": existing["id"],
+        "url": existing.get("url"),
+        "state": existing.get("state") or ("ready" if existing.get("ready") else "remote"),
+        "video": existing.get("video"),
+        "title": existing.get("title"),
+        "error": existing.get("error"),
+    }
+
+
+@app.get("/api/streamer/source/{item_id}")
+async def streamer_source(item_id: str):
+    """Progress/source URL for a marker download started by the endpoint above."""
+    item = await asyncio.to_thread(collector.get_public, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Collector item not found")
+    return {
+        "collector_id": item["id"],
+        "url": item.get("url"),
+        "state": item.get("state"),
+        "video": item.get("video"),
+        "title": item.get("title"),
+        "error": item.get("error"),
+    }
+
+
 # --- Download Manager: full sources in temp, split into the Collector --------
 @app.get("/api/downloads")
 async def downloads_list():
@@ -6368,6 +6445,7 @@ async def process_endpoint(
     collector_id: Optional[str] = Form(None),
     caption_style: Optional[str] = Form(None),
     style_profile_id: Optional[str] = Form(None),
+    streamer: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     # Agent flow: a supplied clip plan (or a transcription-only run) needs no
@@ -6412,6 +6490,7 @@ async def process_endpoint(
         collector_id = body.get("collector_id")
         caption_style = body.get("caption_style")
         style_profile_id = body.get("style_profile_id")
+        streamer = body.get("streamer")
 
     # A Style Profile is a bundle: caption look + output shape + (optional)
     # prompt overrides. Explicit request fields win, so the dashboard can apply
@@ -6442,6 +6521,21 @@ async def process_endpoint(
         style_doc = caption_style_mod.clean(profile.get("caption"))
     if output_format not in ("vertical", "horizontal", "square"):
         output_format = "auto"
+
+    # Streamer split layout: a marked rectangle on the original source. Only
+    # the 9:16 output has the two halves this layout is defined for, so an
+    # explicit horizontal/square render is refused rather than half-applied.
+    streamer_rect = None
+    if streamer not in (None, "", {}, "null"):
+        if output_format not in ("vertical", "auto"):
+            raise HTTPException(
+                status_code=400,
+                detail="Streamer layout needs a vertical (9:16) output.")
+        try:
+            streamer_rect = streamer_layout.clean_rect(streamer)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        output_format = "vertical"
 
     # Accepts a JSON list or a comma-separated form field.
     if isinstance(layouts, str):
@@ -6566,6 +6660,14 @@ async def process_endpoint(
     env.update(chosen)
     if chosen:
         print(f"[layouts] job={job_id} enabled={sorted(chosen)}")
+
+    # Streamer split: main.py composes the marked source crop over the normal
+    # reframe after each clip renders, before captions/hook. The rect is
+    # fractions of the *source* frame, so resolution does not matter.
+    if streamer_rect:
+        env["STREAMER_MODE"] = "1"
+        env["STREAMER_RECT_JSON"] = json.dumps(streamer_rect)
+        print(f"[streamer] job={job_id} rect={streamer_rect}")
 
     # Auto-hook: burn each clip's Gemini hook text during the render. Off when
     # the field is absent, so API/MCP/webhook callers keep their old output
@@ -8692,9 +8794,12 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     # recorded there.
     seam_ranges = layout_ranges.split_ranges(
         clip_data.get('layout_ranges') or layout_ranges.read(input_path))
+    # Streamer clips: the composed frame's seam is not mid-frame, so the
+    # recorded share anchors every caption on that line.
+    caption_seam = _streamer_caption_seam(clip_data)
     caption_style = {k: getattr(req, k) for k in CAPTION_STYLE_FIELDS}
     karaoke_opts = dict(
-        split_ranges=seam_ranges,
+        split_ranges=seam_ranges, seam_share=caption_seam,
         alignment=req.position, fontsize=req.font_size, font_name=req.font_name,
         font_color=req.font_color, border_color=req.border_color,
         border_width=req.border_width, highlight_color=req.highlight_color,
@@ -8764,7 +8869,8 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
             # recorded below is the look that was burned here.
             success = await asyncio.get_event_loop().run_in_executor(
                 None, _burn_caption_style, input_path, output_path, srt_path,
-                sub_transcript, sub_start, sub_end, caption_style, seam_ranges)
+                sub_transcript, sub_start, sub_end, caption_style, seam_ranges,
+                caption_seam)
             if not success:
                 raise HTTPException(status_code=400, detail="No words found for this clip range.")
         

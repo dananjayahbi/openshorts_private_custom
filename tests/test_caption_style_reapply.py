@@ -39,7 +39,8 @@ def test_recorded_style_is_reburned(tmp_path, monkeypatch):
                          {"start": 10.0, "end": 12.0, "caption_style": STYLE})
     seen = {}
 
-    def fake_restyle(path, transcript, start, end, style, layout=None):
+    def fake_restyle(path, transcript, start, end, style, layout=None,
+                     seam_share=None):
         seen.update(path=path, start=start, end=end, style=style)
         return "subtitled_x.mp4"
 
@@ -56,7 +57,8 @@ def test_edited_words_are_reburned_verbatim(tmp_path, monkeypatch):
         "caption_words": words})
     seen = {}
 
-    def fake_restyle(path, transcript, start, end, style, layout=None):
+    def fake_restyle(path, transcript, start, end, style, layout=None,
+                     seam_share=None):
         seen.update(transcript=transcript, start=start, end=end)
         return "out.mp4"
 
@@ -78,6 +80,36 @@ def test_no_recorded_style_keeps_the_default_look(tmp_path, monkeypatch):
                         lambda *a, **k: pytest.fail("no style was recorded"))
     assert app_module._reapply_captions(job_id, 0, video) == "auto.mp4"
     assert calls[0][2:] == (10.0, 12.0)
+
+
+def test_streamer_seam_reaches_the_recorded_style_reburn(tmp_path, monkeypatch):
+    job_id, video = _job(tmp_path, monkeypatch, {
+        "start": 10.0, "end": 12.0, "caption_style": STYLE,
+        "streamer": {"enabled": True, "caption_seam": 0.316406}})
+    seen = {}
+
+    def fake_restyle(path, transcript, start, end, style, layout=None,
+                     seam_share=None):
+        seen["seam"] = seam_share
+        return "subtitled_x.mp4"
+
+    monkeypatch.setattr(app_module, "_restyle_captions", fake_restyle)
+    assert app_module._reapply_captions(job_id, 0, video) == "subtitled_x.mp4"
+    assert seen["seam"] == 0.316406
+
+
+def test_streamer_seam_reaches_the_default_reburn(tmp_path, monkeypatch):
+    job_id, video = _job(tmp_path, monkeypatch, {
+        "start": 10.0, "end": 12.0,
+        "streamer": {"enabled": True, "caption_seam": 0.5}})
+    import sys
+    import types
+    calls = []
+    fake_main = types.SimpleNamespace(
+        auto_caption_clip=lambda *a, **k: calls.append(k) or "auto.mp4")
+    monkeypatch.setitem(sys.modules, "main", fake_main)
+    assert app_module._reapply_captions(job_id, 0, video) == "auto.mp4"
+    assert calls[0]["seam_share"] == 0.5
 
 
 def test_burn_maps_the_recorded_fields(tmp_path, monkeypatch):

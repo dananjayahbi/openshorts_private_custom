@@ -86,12 +86,15 @@ echo.
 
 start "OpenShorts API" cmd /k ""%PYTHON%" -m uvicorn app:app --host 127.0.0.1 --port %API_PORT% --log-level info"
 start "OpenShorts Renderer" cmd /k "cd /d "%~dp0render-service" && npm start"
-start "OpenShorts Dashboard" cmd /k "cd /d "%~dp0dashboard" && npm run dev -- --port %UI_PORT% --strictPort"
+rem Bind Vite to IPv4 explicitly: with host "localhost", Node may bind only
+rem ::1, and on Windows hosts where the IPv6 loopback is unavailable the
+rem dashboard window starts but the browser cannot reach it at all.
+start "OpenShorts Dashboard" cmd /k "cd /d "%~dp0dashboard" && npm run dev -- --host 127.0.0.1 --port %UI_PORT% --strictPort"
 
 rem Give Vite a moment, then open the UI. The API takes longer and the
 rem dashboard polls it, so waiting for the API here would only delay the tab.
 rem (ping, not timeout: timeout refuses to run when stdin is redirected.)
 ping -n 5 127.0.0.1 >nul
-start "" "http://localhost:%UI_PORT%"
+start "" "http://127.0.0.1:%UI_PORT%"
 
 endlocal

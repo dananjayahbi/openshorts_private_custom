@@ -127,6 +127,10 @@ def public(item):
         "state": item.get("state") or ("ready" if path else "remote"),
         "error": item.get("error"),
         "ready": bool(path),
+        # Same-origin URL of the downloaded/uploaded bytes, for previews that
+        # need the real video (the streamer marker). None until it is on disk.
+        "video": (f"/collector/{item['file'].replace(os.sep, '/')}"
+                  if path and item.get("file") else None),
         "queued": bool(item.get("queued")),
         "size_bytes": size,
         "added_at": item.get("added_at"),

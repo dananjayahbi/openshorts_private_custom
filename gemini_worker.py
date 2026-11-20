@@ -303,6 +303,15 @@ Return only:
 }}
 """
 
+STREAMER_NOTE = """
+STREAMED SOURCE: This is a livestream or stream VOD. The streamer's own reaction
+is often the payoff, and the interesting moment may live in what they do or say
+rather than in the game footage. Prefer windows where the streamer reacts,
+speaks to chat, wins/loses something, or a visible event lands; do not favour
+long stretches of gameplay with no commentary or reaction. Keep the same clip
+rules above.
+"""
+
 DETAIL_PROMPT_TEMPLATE = """
 You are a senior short-form video editor and viral copywriter.
 Choose the BEST short clips from these shortlisted candidate windows.
@@ -639,6 +648,8 @@ def main() -> int:
         fmt["min_clips"], fmt["max_clips"] = clip_count_targets(len(payload.get("windows") or []))
         fmt["min_secs"], fmt["max_secs"] = clip_duration_bounds()
     prompt = template.format(**fmt)
+    if os.getenv("STREAMER_MODE") == "1":
+        prompt += "\n" + STREAMER_NOTE
 
     _log(f"🤖 Gemini worker request: mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
     response = client.models.generate_content(

@@ -1241,6 +1241,8 @@ function App() {
       // A named bundle (look + output + prompts). The backend applies any
       // field the dashboard left unset, and prompt overrides for the job.
       style_profile_id: data.styleProfileId || null,
+      // Streamed source: fractions of the ORIGINAL frame for the split layout.
+      streamer: data.streamer ? JSON.stringify(data.streamer) : null,
     };
 
     if (data.type === 'url' || data.type === 'thumbnail_session' || data.type === 'collector') {

@@ -640,7 +640,8 @@ def encode_scenes(input_video, specs, orig_w, orig_h, out_w, out_h, fps,
 
 
 def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
-           force_strategy=None, crop_overrides=None, watermark=False):
+           force_strategy=None, crop_overrides=None, watermark=False,
+           no_blur=False):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     ``content_ranges`` pins which stretches (in this clip's timeline) show a
@@ -661,6 +662,12 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     ``watermark`` overlays the free-plan mark (main.watermark_filter) in every
     segment's own encode, instead of main.apply_watermark re-encoding the
     finished clip once more.
+
+    ``no_blur`` renders every scene as a full-bleed tracked crop. The streamer
+    layout's bottom panel is a narrow 9:8 frame: a GENERAL/WIDE blurred bed
+    there leaves blur bands inside the picture instead of filling it, so the
+    panel's scenes take the same crop TRACK uses. Unlike ``force_strategy``
+    this is still automatic framing, so a v2 failure can fall back to v1.
     """
     import main as m
     content_ranges = content_ranges or []
@@ -691,6 +698,10 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
         strategies = [force_strategy] * len(scenes)
         content_ranges = []  # no screencast/inset upgrades over an explicit choice
         print(f"   🎯 Framing override: every scene -> {force_strategy}")
+    elif no_blur:
+        strategies = ['TRACK'] * len(scenes)
+        content_ranges = []
+        print("   🎞️ Full-bleed panel: every scene -> TRACK (no blurred filler)")
     elif passthrough:
         strategies = ['TRACK'] * len(scenes)
         content_ranges = []
@@ -708,7 +719,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     # that begin past the last decoded frame, and those get dropped).
     splits = {}
     split_scene_of = {}
-    detected_splits = {} if passthrough else split_layout.detect_split_scenes(
+    detected_splits = {} if (passthrough or no_blur) else split_layout.detect_split_scenes(
         input_video, scenes, strategies)
     for scene_idx, centres in detected_splits.items():
         strategies[scene_idx] = 'SPLIT'

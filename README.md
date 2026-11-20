@@ -15,7 +15,7 @@ Docker.
 | Page | What it does |
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip, **unload vram** |
-| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or a queue that loops the same screen; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
+| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or a queue that loops the same screen; **streamed video** split with a marked streamer box; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
 | Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, bulk-archive the selection, staged one-platform archive buttons |
 | Archive | Permanent clip store with advanced filters; push videos to external storage vaults and play them back when the device is connected |
 | Collector | Shelf of links and files; download later, queue, process |

@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film, Crosshair } from 'lucide-react';
 import { track } from '../lib/analytics';
 import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 import SourceCost from './SourceCost';
 import CollectorPicker from './CollectorPicker';
+import StreamerMarker from './StreamerMarker';
 import { DEFAULT_CAPTION_STYLE, presetToStyle } from '../lib/captionStyles';
 
 const SUPPORTED_PLATFORMS = [
@@ -90,8 +91,21 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     const [styleProfileId, setStyleProfileId] = useState(() => {
         try { return localStorage.getItem('os_style_profile') || ''; } catch { return ''; }
     });
+    // Streamed source (New feature #8): a 9:16 split with the streamer's marked
+    // box on top. Single-video only; the rectangle is fractions of the source.
+    const [streamed, setStreamed] = useState(false);
+    const [streamerRect, setStreamerRect] = useState(null);
+    // {src, title, objectUrl?} while the marker modal is open.
+    const [marker, setMarker] = useState(null);
+    const [markerBusy, setMarkerBusy] = useState('');
+    const [markerError, setMarkerError] = useState('');
+    // A URL source prepared for the marker: the Collector item holds a local
+    // copy, so the job processes it instead of downloading the link again.
+    const [prepared, setPrepared] = useState(null); // {id, inputUrl}
     const infoRef = useRef(null);
     const fileInput = useRef(null);
+    const pickedId = picked[0]?.id || '';
+    const preparedForUrl = prepared && prepared.inputUrl === url ? prepared : null;
 
     const singleFile = files[0] || null;
     const fileSeconds = singleFile ? durations[fileKey(singleFile)] ?? null : null;
@@ -148,6 +162,19 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
             })
             .catch(() => {});
     }, []);
+
+    // A marker preview from a local File is an object URL; free it when the
+    // modal closes or the source changes, otherwise every open leaks a handle.
+    useEffect(() => () => {
+        if (marker?.objectUrl) URL.revokeObjectURL(marker.objectUrl);
+    }, [marker]);
+
+    // The box belongs to one source: changing tab, link, file or collector item
+    // must not silently reuse coordinates on different footage.
+    useEffect(() => {
+        setStreamerRect(null);
+        setPrepared(null);
+    }, [mode, url, singleFile, pickedId]);
 
     // A Collector card's "Process" opens this page with its video already
     // selected. Applied once per handover (the same item can be handed over
@@ -230,6 +257,94 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     };
     useEffect(() => { refreshQueue(); }, [mode, bulk]);
 
+    const waitForCollectorSource = async (itemId) => {
+        for (let attempt = 0; attempt < 300; attempt += 1) {
+            const res = await apiFetch('/api/collector');
+            if (!res.ok) throw new Error('Could not read the Collector.');
+            const data = await res.json();
+            const item = (data.items || []).find((entry) => entry.id === itemId);
+            if (!item) throw new Error('The prepared source is gone.');
+            if (item.video) return item;
+            if (item.state === 'error') {
+                throw new Error(item.error || 'That source could not be downloaded.');
+            }
+            setMarkerBusy(item.progress != null
+                ? `Downloading the source for the marker... ${item.progress}%`
+                : 'Downloading the source for the marker...');
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        throw new Error('The source is taking too long to download.');
+    };
+
+    const prepareCollectorItem = async (item) => {
+        if (item.video) return item;
+        setMarkerBusy('Downloading the source for the marker...');
+        const res = await apiFetch(`/api/collector/${item.id}/download`, { method: 'POST' });
+        if (!res.ok) {
+            let detail = '';
+            try { detail = (await res.json()).detail; } catch { /* not JSON */ }
+            throw new Error(detail || 'That source could not be downloaded.');
+        }
+        return waitForCollectorSource(item.id);
+    };
+
+    const prepareUrlSource = async (link) => {
+        const res = await apiFetch('/api/streamer/prepare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: link }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(typeof data.detail === 'string'
+                ? data.detail : 'That link could not be read.');
+        }
+        if (data.video) return data;
+        return waitForCollectorSource(data.collector_id);
+    };
+
+    // The marker needs real frames. Files play straight from the browser; a
+    // link is downloaded into the Collector first (and then reused by the job).
+    const openMarker = async () => {
+        setMarkerError('');
+        setMarkerBusy('');
+        try {
+            if (mode === 'file') {
+                if (!singleFile) throw new Error('Choose a video file first.');
+                const objectUrl = URL.createObjectURL(singleFile);
+                setMarker({ src: objectUrl, title: singleFile.name, objectUrl });
+            } else if (mode === 'collector') {
+                if (!picked[0]) throw new Error('Pick a Collector video first.');
+                const item = await prepareCollectorItem(picked[0]);
+                setMarker({ src: getApiUrl(item.video), title: item.title });
+            } else {
+                if (!url.trim()) throw new Error('Paste a video link first.');
+                setMarkerBusy('Reading the link...');
+                const item = await prepareUrlSource(url.trim());
+                setPrepared({ id: item.collector_id || item.id, inputUrl: url.trim() });
+                setMarker({ src: getApiUrl(item.video), title: item.title });
+            }
+        } catch (e) {
+            setMarkerError(String(e.message || e).slice(0, 260));
+        } finally {
+            setMarkerBusy('');
+        }
+    };
+
+    const closeMarker = () => {
+        setMarker(null);
+        setMarkerError('');
+    };
+
+    const toggleStreamed = (on) => {
+        setStreamed(on);
+        if (on) {
+            // The split layout is defined for the 9:16 output only.
+            setOutputFormat('vertical');
+            setMarkerError('');
+        }
+    };
+
     const advanced = () => ({
         targetClips: targetClips || null,
         clipMinSeconds: clipMinSeconds || null,
@@ -242,6 +357,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         captionStyle,
         captions: captionsOn,
         styleProfileId: styleProfileId || null,
+        streamer: (!bulk && streamed && streamerRect) ? streamerRect : null,
     });
 
     const rememberOptions = () => {
@@ -257,6 +373,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     const setBulkMode = (next) => {
         setBulk(next);
+        if (next) setStreamed(false);
         if (!next) {
             setFiles((prev) => prev.slice(0, 1));
             setPicked((prev) => prev.slice(0, 1));
@@ -265,6 +382,10 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     const handleSubmit = (e) => {
         e.preventDefault();
+        if (streamed && !streamerRect) {
+            setMarkerError('Mark the streamer box before starting the render.');
+            return;
+        }
         rememberOptions();
         const options = advanced();
 
@@ -283,7 +404,19 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         }
 
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...options });
+            if (streamed && preparedForUrl) {
+                // The marker downloaded the link already; process that local
+                // copy instead of fetching the same source a second time.
+                onProcess({
+                    type: 'collector',
+                    payload: preparedForUrl.id,
+                    acknowledged: true,
+                    outputFormat,
+                    ...options,
+                });
+            } else {
+                onProcess({ type: 'url', payload: url, acknowledged: true, outputFormat, ...options });
+            }
         } else if (mode === 'file' && singleFile && !fileTooShort) {
             onProcess({ type: 'file', payload: singleFile, acknowledged: true, outputFormat, ...options });
         } else if (mode === 'collector' && picked[0]) {
@@ -308,6 +441,8 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                 outputFormat,
                 acknowledged: true,
                 ...advanced(),
+                // Queues are never streamer jobs (the marker is per video).
+                streamer: null,
             });
         } catch (e) {
             setQueueError(String(e.message || e).slice(0, 240));
@@ -351,6 +486,54 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                     bulk mode
                 </label>
             </div>
+
+            {!bulk && (
+                <div className="mb-4 rounded-card border border-rule bg-paper2/60 p-3">
+                    <label className="flex items-start gap-2 cursor-pointer select-none">
+                        <input
+                            type="checkbox"
+                            checked={streamed}
+                            onChange={(e) => toggleStreamed(e.target.checked)}
+                            className="mt-0.5 w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+                        />
+                        <span>
+                            <span className="text-sm text-ink">streamed video</span>
+                            <span className="block text-[11px] text-muted leading-snug">
+                                Splits the 9:16 output: the streamer&apos;s marked box on top, the
+                                viral clip on the bottom. Resize the box to its real shape — a 16:9
+                                cam leaves most of the frame to the clip. The AI also gets told
+                                this is a stream.
+                            </span>
+                        </span>
+                    </label>
+                    {streamed && (
+                        <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-6">
+                            <button
+                                type="button"
+                                onClick={openMarker}
+                                disabled={!!markerBusy}
+                                className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerRect ? '' : 'text-brass'}`}
+                            >
+                                {markerBusy ? <Loader2 size={13} className="animate-spin" /> : <Crosshair size={13} />}
+                                {streamerRect ? 'edit streamer box' : 'mark streamer box'}
+                            </button>
+                            {streamerRect ? (
+                                <span className="readout text-[11px] text-ok">
+                                    box saved ({Math.round(streamerRect.w * 100)}x{Math.round(streamerRect.h * 100)}%)
+                                </span>
+                            ) : (
+                                <span className="readout text-[11px] text-muted">
+                                    mark the box, then start the render
+                                </span>
+                            )}
+                            {markerBusy && <span className="readout text-[11px]">{markerBusy}</span>}
+                            {markerError && (
+                                <span className="text-[11px] text-danger" role="alert">{markerError}</span>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule overflow-x-auto" data-tutorial="source-tabs">
                 <button
@@ -580,13 +763,17 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             { value: 'horizontal', label: '16:9', hint: 'Keep landscape · YouTube', w: 36, h: 20 },
                         ].map((f) => {
                             const active = outputFormat === f.value;
+                            const locked = streamed && f.value !== 'vertical';
                             return (
                                 <button
                                     key={f.value}
                                     type="button"
+                                    disabled={locked}
                                     onClick={() => setOutputFormat(f.value)}
+                                    title={locked ? 'Streamed videos render in 9:16' : undefined}
                                     className={`py-3 px-2 rounded-input border flex flex-col items-center gap-2 transition-colors
-                                        ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
+                                        ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}
+                                        ${locked ? 'opacity-40 cursor-not-allowed' : ''}`}
                                 >
                                     {/* Aspect-ratio glyph */}
                                     <span
@@ -788,6 +975,18 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                     setPicked(bulk ? items : items.slice(0, 1));
                     setPickerOpen(false);
                 }}
+            />
+
+            <StreamerMarker
+                open={!!marker}
+                src={marker?.src}
+                title={marker?.title}
+                initialRect={streamerRect}
+                onSave={(rect) => {
+                    setStreamerRect(rect);
+                    closeMarker();
+                }}
+                onClose={closeMarker}
             />
         </div>
     );

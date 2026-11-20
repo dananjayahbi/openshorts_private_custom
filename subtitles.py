@@ -355,7 +355,7 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
                  highlight_color="#FFD700", bg_color="#000000", bg_opacity=0.0,
                  effect="none", base_opacity=1.0, uppercase=False,
                  margin_v=SAFE_MARGIN_V, split_ranges=None,
-                 reveal=False, shadow=0):
+                 reveal=False, shadow=0, seam_share=None):
     """
     Generates a karaoke-style ASS file: each block is shown like the SRT path,
     but the currently spoken word is rendered in highlight_color (modern
@@ -374,6 +374,10 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     shadow: drop shadow depth in PlayRes units (0 = none). With border_width
     0 it is the soft "clean" look; a hard outline does not need it.
     max_chars=1 puts one word on screen at a time.
+    seam_share: 0..1 vertical position of a composed frame's split seam
+    (streamer mode). Every event is anchored there with \\an5 + \\pos, so the
+    text straddles the seam and covers a little of both panels instead of
+    sitting on the clip alone. None keeps the style's own position.
     """
     blocks = _collect_word_blocks(transcript, clip_start, clip_end, max_chars, max_duration)
     if not blocks:
@@ -397,7 +401,22 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     # this: SRT burns carry one alignment for the whole file.
     seam_ranges = [(float(a), float(b)) for a, b in (split_ranges or [])]
 
+    # Streamer mode: the split seam is not mid-frame (a 16:9 box puts it at
+    # ~32% of the height), so inline \pos anchors every event exactly there.
+    # PlayResX stays the libass default of 384 (PlayResY is 288), so x=192 is
+    # the horizontal centre; y is the seam's share of 288.
+    seam_y = None
+    if seam_share is not None:
+        try:
+            share = float(seam_share)
+        except (TypeError, ValueError):
+            share = None
+        if share is not None and 0.05 <= share <= 0.95:
+            seam_y = int(round(288 * share))
+
     def seam_prefix(t):
+        if seam_y is not None:
+            return f"{{\\an5\\pos(192,{seam_y})}}"
         return "{\\an5}" if any(a <= t < b for a, b in seam_ranges) else ""
 
     safe_font = _sanitize_font_name(font_name)
@@ -464,6 +483,7 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
+        "PlayResX: 384\n"
         "PlayResY: 288\n"
         "WrapStyle: 0\n"
         "ScaledBorderAndShadow: yes\n"

@@ -54,6 +54,13 @@ load_dotenv()
 # --- Constants ---
 ASPECT_RATIO = 9 / 16
 
+
+def streamer_prompt_note():
+    """Extra instruction appended to the clip-selection prompts in streamer mode."""
+    if os.environ.get("STREAMER_MODE") != "1":
+        return ""
+    return "\n" + gemini_worker.STREAMER_NOTE
+
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the MOST VIRAL moments for Facebook / YouTube Shorts — as many as the material genuinely holds, because an hours-long source can yield 100s of clips. Each clip must be between 15 and 60 seconds long.
 
@@ -438,6 +445,61 @@ def _detection_frame(frame):
     return small, scale
 
 
+# --- Streamer box: keep the subject tracker off the streamer ---------------
+# In streamer mode the user marks the streamer's own box on the source. The
+# bottom half of the output is the viral clip, and its reframe must follow the
+# video content — but a face/person detector sees the streamer as just another
+# subject (often the biggest, most persistent one) and the track locks onto it.
+# So the marked area is blanked in the copy handed to the detectors, never in
+# the frame that gets rendered. Fractions of the frame work at any size, which
+# matters because v2 runs the detectors on a downscaled copy.
+_STREAMER_MASK_RAW = object()   # sentinel: not read yet
+_STREAMER_MASK_RECT = None
+
+
+def _streamer_detection_mask():
+    """``{x, y, w, h}`` fractions to blank before detection, or None.
+
+    Cached by the raw env value so the per-detection path does not re-parse
+    JSON, while a test (or a re-used interpreter) that changes the env is still
+    picked up.
+    """
+    global _STREAMER_MASK_RAW, _STREAMER_MASK_RECT
+    raw = (os.environ.get("STREAMER_RECT_JSON")
+           if os.environ.get("STREAMER_MODE") == "1" else None)
+    if raw != _STREAMER_MASK_RAW:
+        _STREAMER_MASK_RAW = raw
+        _STREAMER_MASK_RECT = None
+        if raw:
+            try:
+                import streamer_layout
+                _STREAMER_MASK_RECT = streamer_layout.clean_rect(raw)
+            except Exception:
+                _STREAMER_MASK_RECT = None
+    return _STREAMER_MASK_RECT
+
+
+def _mask_streamer_area(frame):
+    """A copy of ``frame`` with the marked streamer box blanked, or ``frame``.
+
+    Detectors only: the rendered path keeps the original pixels. Returns the
+    same array object when there is no box, so the common case costs nothing.
+    """
+    rect = _streamer_detection_mask()
+    if not rect:
+        return frame
+    height, width = frame.shape[:2]
+    x0 = max(0, min(width, int(rect["x"] * width)))
+    y0 = max(0, min(height, int(rect["y"] * height)))
+    x1 = max(0, min(width, int(round((rect["x"] + rect["w"]) * width))))
+    y1 = max(0, min(height, int(round((rect["y"] + rect["h"]) * height))))
+    if x1 <= x0 or y1 <= y0:
+        return frame
+    masked = frame.copy()
+    masked[y0:y1, x0:x1] = 0
+    return masked
+
+
 def detect_face_candidates(frame):
     """
     Returns list of all detected faces using lightweight FaceDetection.
@@ -446,6 +508,8 @@ def detect_face_candidates(frame):
     """
     height, width, _ = frame.shape
     small, _scale = _detection_frame(frame)
+    # Streamer mode: the marked box is the streamer, not the clip's subject.
+    small = _mask_streamer_area(small)
     rgb_frame = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
     global face_detection
     with DETECT_LOCK:
@@ -480,6 +544,8 @@ def detect_person_yolo(frame):
     ORIGINAL frame coordinates (inference runs on a downscaled copy).
     """
     small, scale = _detection_frame(frame)
+    # Streamer mode: never let the fallback lock onto the marked streamer box.
+    small = _mask_streamer_area(small)
     # Use the globally loaded model; reload if the Unload VRAM action dropped
     # it (the API process is long-lived and can outlive its models).
     global model
@@ -1328,13 +1394,17 @@ def caption_style_from_env():
 
 
 def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=None,
-                      plan_only=False, mark=False):
+                      plan_only=False, mark=False, seam_share=None):
     """Burn the default caption style onto a finished clip.
 
     ``split_ranges``: (start, end) stretches, in clip seconds, rendered with
     the SPLIT layout; captions there sit on the seam between the two speakers
     instead of the bottom. None reads the render's own sidecar next to
     ``clip_path`` (layout_ranges), which is where recut hands it over.
+
+    ``seam_share``: streamer mode's split seam as a 0..1 share of the frame
+    height. Every caption is anchored on that line, so it straddles the
+    streamer panel and the clip panel instead of sitting on the clip alone.
 
     Captions are mandatory for short-form to land, but they were opt-in behind a
     modal and only 9% of delivered clips ever got them (prod audit, 25-jul-2026).
@@ -1405,7 +1475,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end, split_ranges=
                 bg_color=style["bg_color"], bg_opacity=style["bg_opacity"],
                 effect=style["effect"], base_opacity=style["base_opacity"],
                 uppercase=style["uppercase"], reveal=style["reveal"],
-                shadow=style["shadow"]):
+                shadow=style["shadow"], seam_share=seam_share):
             print("   ℹ️ No words in range — clip ships without captions.")
             return None
 
@@ -1554,13 +1624,20 @@ def trim_subtitle_band(input_video, band):
 
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None, watermark=False,
-                subtitle_band=None):
+                subtitle_band=None, reframe_aspect=None, no_blur=False):
     """Route a cut clip through the right renderer for the chosen output format.
     vertical/auto -> 9:16 reframe, square -> 1:1 reframe, horizontal -> keep.
     ``force_strategy`` (e.g. 'WIDE'/'TRACK') pins every scene's layout — the
     clip editor's whole-clip framing override. ``crop_overrides`` positions
     individual scenes by hand (the per-scene reframing editor) and wins over
     ``force_strategy`` for the scenes it names.
+    ``reframe_aspect`` overrides the output shape of the reframe. Streamer mode
+    renders its bottom panel at whatever shape the marked box leaves so the
+    panel fills edge to edge with no blurred fill; the composer then stacks it
+    under the marked crop.
+    ``no_blur`` renders every scene as a full-bleed tracked crop instead of
+    letting wide/group shots fall into the blurred-backdrop layouts: with the
+    panel already narrow, the blur would eat the picture rather than fill it.
     ``watermark`` burns the free-plan mark into the result: inside the reframe
     encode on the v2 path, as a separate pass (apply_watermark) otherwise.
     ``subtitle_band`` (the job metadata's ``source_subtitle_band``) trims the
@@ -1570,24 +1647,29 @@ def render_clip(input_video, final_output_video, output_format="auto",
     trimmed = trim_subtitle_band(input_video, subtitle_band)
     try:
         return _render_clip(trimmed, final_output_video, output_format,
-                            force_strategy, crop_overrides, watermark)
+                            force_strategy, crop_overrides, watermark,
+                            reframe_aspect, no_blur)
     finally:
         if trimmed != input_video and os.path.exists(trimmed):
             os.remove(trimmed)
 
 
 def _render_clip(input_video, final_output_video, output_format,
-                 force_strategy, crop_overrides, watermark):
+                 force_strategy, crop_overrides, watermark, reframe_aspect=None,
+                 no_blur=False):
     if output_format == "horizontal":
         ok = finalize_clip_passthrough(input_video, final_output_video)
         if ok and watermark:
             apply_watermark(final_output_video)
         return ok
-    aspect = 1.0 if output_format == "square" else ASPECT_RATIO
+    if reframe_aspect:
+        aspect = reframe_aspect
+    else:
+        aspect = 1.0 if output_format == "square" else ASPECT_RATIO
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      force_strategy=force_strategy,
                                      crop_overrides=crop_overrides,
-                                     watermark=watermark)
+                                     watermark=watermark, no_blur=no_blur)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -1702,7 +1784,8 @@ def mark_delivery(final_path, marker=None):
 
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
-                              force_strategy=None, crop_overrides=None, watermark=False):
+                              force_strategy=None, crop_overrides=None, watermark=False,
+                              no_blur=False):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -1710,6 +1793,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
     force_strategy / crop_overrides pin layouts and scene crops by hand (v2
     engine only — the v1 loop below has no layout concept beyond its own
     classifier).
+    no_blur: render every scene as a full-bleed tracked crop; no blurred
+    backdrop, even on wide or face-less shots (the streamer bottom panel).
     """
     # v2 engine: analyze downscaled, render natively in ffmpeg. Any failure
     # falls back to the v1 frame loop below so a v2 edge case can't kill jobs.
@@ -1720,7 +1805,7 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        force_strategy=force_strategy,
                                        crop_overrides=crop_overrides,
-                                       watermark=watermark)
+                                       watermark=watermark, no_blur=no_blur)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
@@ -1777,7 +1862,10 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
     # --- New Strategy: Per-Scene Analysis ---
     print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
     scene_strategies = analyze_scenes_strategy(input_video, scenes)
-    # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes
+    # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes.
+    # A no-blur panel takes the full-bleed crop in the v1 loop too.
+    if no_blur:
+        scene_strategies = ['TRACK'] * len(scenes)
     
     print("\n   ✂️ Step 4: Processing video frames...")
     
@@ -2300,7 +2388,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
         def _score_prompt(ws):
             return prompt_store.render(
                 "score", video_duration=video_duration, language=language,
-                windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                windows_json=json.dumps(_payload(ws), ensure_ascii=False)
+            ) + streamer_prompt_note()
 
         for batch in score_batches(windows, SCORE_BATCH):
             scored.extend(_run_stage_split(
@@ -2347,7 +2436,8 @@ def get_viral_clips(transcript_result, video_duration, viewer_clips=None):
                     "detail", video_duration=video_duration, language=language,
                     min_clips=lo, max_clips=hi,
                     min_secs=min_secs, max_secs=max_secs,
-                    windows_json=json.dumps(_payload(ws), ensure_ascii=False))
+                    windows_json=json.dumps(_payload(ws), ensure_ascii=False)
+                ) + streamer_prompt_note()
             return build
 
         shorts = []
@@ -2550,7 +2640,7 @@ def _visual_pass_stills(model_name, video_path, duration, language,
         prompt = prompt_store.render(
             "visual", video_duration=duration, language=language,
             min_clips=min_clips, max_clips=max_clips,
-            min_secs=min_secs, max_secs=max_secs) + sampled + (hint or "")
+            min_secs=min_secs, max_secs=max_secs) + sampled + (hint or "") + streamer_prompt_note()
         parsed = llm_backend.generate_vision_json(
             prompt, gemini_worker.VisualResponse, frames)
         clean = []
@@ -2594,7 +2684,7 @@ def _visual_pass(client, model_name, video_path, duration, language,
         prompt = prompt_store.render(
             "visual", video_duration=duration, language=language,
             min_clips=min_clips, max_clips=max_clips,
-            min_secs=min_secs, max_secs=max_secs) + (hint or "")
+            min_secs=min_secs, max_secs=max_secs) + (hint or "") + streamer_prompt_note()
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
@@ -2762,6 +2852,22 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     output_format = args.format
+    # Streamer split layout (New feature #8): the dashboard sends the marked
+    # box as fractions of the original source frame. It is applied after each
+    # normal reframe and before captions, so the caption style/position is
+    # untouched. A bad value degrades to a plain clip instead of failing a job.
+    streamer_rect = None
+    streamer_bottom_aspect = None
+    streamer_caption_seam = None
+    streamer_source_size = (0, 0)
+    if os.environ.get("STREAMER_MODE") == "1":
+        try:
+            import streamer_layout
+            streamer_rect = streamer_layout.clean_rect(
+                os.environ.get("STREAMER_RECT_JSON") or "{}")
+            print(f"   🎭 Streamer layout armed: {streamer_rect}")
+        except Exception as e:
+            print(f"⚠️ Streamer layout ignored ({e}) — rendering normal clips.")
 
     script_start_time = time.time()
 
@@ -3086,6 +3192,30 @@ if __name__ == '__main__':
             # --keep-original) or in uploads/ (upload jobs).
             clips_data['source_video'] = os.path.basename(input_video)
             clips_data['output_format'] = output_format
+            if streamer_rect:
+                import streamer_layout as _streamer
+                streamer_source_size = _streamer.probe_size(input_video)
+                if not _streamer.aspect_ok(*streamer_source_size, streamer_rect):
+                    print("\u26a0\ufe0f Streamer box shape is outside the 15%-85% "
+                          "split range — rendering normal clips.")
+                    streamer_rect = None
+                else:
+                    # The marked box's shape decides the split: a 16:9 box takes
+                    # ~32% of the frame, the default 9:8 box 50%. The bottom
+                    # panel is rendered at the remaining shape, so it fills its
+                    # panel edge to edge with no blurred filler.
+                    streamer_bottom_aspect = _streamer.bottom_aspect(
+                        streamer_rect, *streamer_source_size)
+                    # Captions sit on the seam between the two panels, not at
+                    # the bottom of the composed frame.
+                    streamer_caption_seam = _streamer.top_share(
+                        *streamer_source_size, streamer_rect)
+                    clips_data['streamer'] = {
+                        "enabled": True,
+                        "rect": streamer_rect,
+                        "bottom_aspect": round(streamer_bottom_aspect, 6),
+                        "caption_seam": round(streamer_caption_seam, 6),
+                    }
             if source_subtitle_band:
                 clips_data['source_subtitle_band'] = source_subtitle_band
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
@@ -3117,10 +3247,36 @@ if __name__ == '__main__':
                     # permanent: paying could not remove it from clips already
                     # made. Each worker writes only its own clip dict, so the
                     # re-dump after the pool is race-free.
+                    # Streamer mode: the bottom panel is reframed at the shape
+                    # the marked box leaves, so it fills its panel edge to edge.
+                    # TRACK is the only layout that never puts a blurred bed in
+                    # the panel; the marked streamer box is masked out of
+                    # detection (see _mask_streamer_area), so the crop follows
+                    # the video.
+                    bottom_aspect = streamer_bottom_aspect
                     success = render_clip(clip_temp_path, clip_final_path, output_format,
-                                          subtitle_band=source_subtitle_band)
+                                          subtitle_band=source_subtitle_band,
+                                          reframe_aspect=bottom_aspect,
+                                          no_blur=bool(streamer_rect))
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
+                    # Streamer split: compose the marked source crop over this
+                    # reframe before captions/hook are burned, so their position
+                    # and style stay exactly what the user chose.
+                    if success and streamer_rect:
+                        import streamer_layout
+                        if streamer_layout.apply(
+                                clip_final_path, input_video, start, end, streamer_rect,
+                                *streamer_source_size):
+                            # The reframe's layout map describes the bottom
+                            # image; captions must not be placed on its SPLIT
+                            # seam inside the composed frame.
+                            import layout_ranges as _streamer_ranges
+                            try:
+                                os.remove(_streamer_ranges.sidecar_path(clip_final_path))
+                            except OSError:
+                                pass
+                            print(f"   🎭 Clip {i+1} streamer split composed")
                     deliver_path = clip_final_path
                     # Which stretches were stacked (SPLIT): captions go on the
                     # seam there, and /api/subtitle needs it again later.
@@ -3139,7 +3295,8 @@ if __name__ == '__main__':
                         plan = None
                         if (clip.get('viral_hook_text') or '').strip():
                             plan = auto_caption_clip(clip_final_path, transcript, start, end,
-                                                     split_ranges=split_ranges, plan_only=True)
+                                                     split_ranges=split_ranges, plan_only=True,
+                                                     seam_share=streamer_caption_seam)
                         hooked = auto_hook_clip(clip_final_path, clip, captions=plan,
                                                 mark=os.environ.get("WATERMARK") == "1")
                         if hooked:
@@ -3150,6 +3307,7 @@ if __name__ == '__main__':
                             captioned = auto_caption_clip(
                                 deliver_path, transcript, start, end,
                                 split_ranges=split_ranges,
+                                seam_share=streamer_caption_seam,
                                 mark=os.environ.get("WATERMARK") == "1")
                         served = captioned or deliver_path
                         if os.environ.get("AUTO_CAPTION_STYLE_JSON"):
