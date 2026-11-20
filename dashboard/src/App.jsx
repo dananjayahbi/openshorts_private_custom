@@ -1243,6 +1243,9 @@ function App() {
       style_profile_id: data.styleProfileId || null,
       // Streamed source: fractions of the ORIGINAL frame for the split layout.
       streamer: data.streamer ? JSON.stringify(data.streamer) : null,
+      // The streamer's whole cam/overlay, kept out of the clip's half.
+      streamer_avoid: data.streamerAvoid
+        ? JSON.stringify(data.streamerAvoid) : null,
     };
 
     if (data.type === 'url' || data.type === 'thumbnail_session' || data.type === 'collector') {

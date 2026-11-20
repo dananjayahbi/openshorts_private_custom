@@ -6446,6 +6446,7 @@ async def process_endpoint(
     caption_style: Optional[str] = Form(None),
     style_profile_id: Optional[str] = Form(None),
     streamer: Optional[str] = Form(None),
+    streamer_avoid: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     # Agent flow: a supplied clip plan (or a transcription-only run) needs no
@@ -6491,6 +6492,7 @@ async def process_endpoint(
         caption_style = body.get("caption_style")
         style_profile_id = body.get("style_profile_id")
         streamer = body.get("streamer")
+        streamer_avoid = body.get("streamer_avoid")
 
     # A Style Profile is a bundle: caption look + output shape + (optional)
     # prompt overrides. Explicit request fields win, so the dashboard can apply
@@ -6525,7 +6527,11 @@ async def process_endpoint(
     # Streamer split layout: a marked rectangle on the original source. Only
     # the 9:16 output has the two halves this layout is defined for, so an
     # explicit horizontal/square render is refused rather than half-applied.
+    # ``streamer_avoid`` is the separate prevention area (the streamer's whole
+    # cam box, wider than the crop shown on top): the bottom panel must never
+    # show it. It is meaningless without the split, so it needs ``streamer``.
     streamer_rect = None
+    streamer_avoid_zones = []
     if streamer not in (None, "", {}, "null"):
         if output_format not in ("vertical", "auto"):
             raise HTTPException(
@@ -6536,6 +6542,11 @@ async def process_endpoint(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         output_format = "vertical"
+        if streamer_avoid not in (None, "", {}, "null", []):
+            try:
+                streamer_avoid_zones = streamer_layout.clean_rect_list(streamer_avoid)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
 
     # Accepts a JSON list or a comma-separated form field.
     if isinstance(layouts, str):
@@ -6668,6 +6679,9 @@ async def process_endpoint(
         env["STREAMER_MODE"] = "1"
         env["STREAMER_RECT_JSON"] = json.dumps(streamer_rect)
         print(f"[streamer] job={job_id} rect={streamer_rect}")
+        if streamer_avoid_zones:
+            env["STREAMER_AVOID_JSON"] = json.dumps(streamer_avoid_zones)
+            print(f"[streamer] job={job_id} avoid={streamer_avoid_zones}")
 
     # Auto-hook: burn each clip's Gemini hook text during the render. Off when
     # the field is absent, so API/MCP/webhook callers keep their old output

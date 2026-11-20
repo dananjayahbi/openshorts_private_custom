@@ -450,54 +450,70 @@ def _detection_frame(frame):
 # bottom half of the output is the viral clip, and its reframe must follow the
 # video content — but a face/person detector sees the streamer as just another
 # subject (often the biggest, most persistent one) and the track locks onto it.
-# So the marked area is blanked in the copy handed to the detectors, never in
-# the frame that gets rendered. Fractions of the frame work at any size, which
-# matters because v2 runs the detectors on a downscaled copy.
-_STREAMER_MASK_RAW = object()   # sentinel: not read yet
-_STREAMER_MASK_RECT = None
+# So the marked areas are blanked in the copy handed to the detectors, never in
+# the frame that gets rendered. That is two marked boxes: the streamer crop
+# shown on top (often only part of the cam) and the prevention area, which
+# covers the whole cam/overlay the clip must not show. Fractions of the frame
+# work at any size, which matters because v2 runs the detectors on a downscaled
+# copy.
+_STREAMER_MASK_RAW = None   # sentinel: nothing read yet
+_STREAMER_MASK_RECTS = ()
 
 
-def _streamer_detection_mask():
-    """``{x, y, w, h}`` fractions to blank before detection, or None.
+def _streamer_detection_masks():
+    """``({x, y, w, h}, ...)`` fractions to blank before detection.
 
-    Cached by the raw env value so the per-detection path does not re-parse
-    JSON, while a test (or a re-used interpreter) that changes the env is still
-    picked up.
+    Both marked boxes are used: the streamer crop (which may be only a zoom of
+    the cam) and the prevention area (which is the whole thing). Cached by the
+    raw env values so the per-detection path does not re-parse JSON, while a
+    test (or a re-used interpreter) that changes the env is still picked up.
     """
-    global _STREAMER_MASK_RAW, _STREAMER_MASK_RECT
-    raw = (os.environ.get("STREAMER_RECT_JSON")
-           if os.environ.get("STREAMER_MODE") == "1" else None)
+    global _STREAMER_MASK_RAW, _STREAMER_MASK_RECTS
+    if os.environ.get("STREAMER_MODE") == "1":
+        raw = (os.environ.get("STREAMER_RECT_JSON"),
+               os.environ.get("STREAMER_AVOID_JSON"))
+    else:
+        raw = None
     if raw != _STREAMER_MASK_RAW:
         _STREAMER_MASK_RAW = raw
-        _STREAMER_MASK_RECT = None
+        _STREAMER_MASK_RECTS = ()
         if raw:
+            import streamer_layout
+            rects = []
             try:
-                import streamer_layout
-                _STREAMER_MASK_RECT = streamer_layout.clean_rect(raw)
+                rects.append(streamer_layout.clean_rect(raw[0]))
             except Exception:
-                _STREAMER_MASK_RECT = None
-    return _STREAMER_MASK_RECT
+                pass
+            try:
+                rects.extend(streamer_layout.clean_rect_list(raw[1]))
+            except Exception:
+                pass
+            _STREAMER_MASK_RECTS = tuple(rects)
+    return _STREAMER_MASK_RECTS
 
 
 def _mask_streamer_area(frame):
-    """A copy of ``frame`` with the marked streamer box blanked, or ``frame``.
+    """A copy of ``frame`` with every marked area blanked, or ``frame``.
 
     Detectors only: the rendered path keeps the original pixels. Returns the
     same array object when there is no box, so the common case costs nothing.
     """
-    rect = _streamer_detection_mask()
-    if not rect:
+    rects = _streamer_detection_masks()
+    if not rects:
         return frame
     height, width = frame.shape[:2]
-    x0 = max(0, min(width, int(rect["x"] * width)))
-    y0 = max(0, min(height, int(rect["y"] * height)))
-    x1 = max(0, min(width, int(round((rect["x"] + rect["w"]) * width))))
-    y1 = max(0, min(height, int(round((rect["y"] + rect["h"]) * height))))
-    if x1 <= x0 or y1 <= y0:
-        return frame
-    masked = frame.copy()
-    masked[y0:y1, x0:x1] = 0
-    return masked
+    masked = None
+    for rect in rects:
+        x0 = max(0, min(width, int(rect["x"] * width)))
+        y0 = max(0, min(height, int(rect["y"] * height)))
+        x1 = max(0, min(width, int(round((rect["x"] + rect["w"]) * width))))
+        y1 = max(0, min(height, int(round((rect["y"] + rect["h"]) * height))))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        if masked is None:
+            masked = frame.copy()
+        masked[y0:y1, x0:x1] = 0
+    return frame if masked is None else masked
 
 
 def detect_face_candidates(frame):
@@ -1624,7 +1640,8 @@ def trim_subtitle_band(input_video, band):
 
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None, watermark=False,
-                subtitle_band=None, reframe_aspect=None, no_blur=False):
+                subtitle_band=None, reframe_aspect=None, no_blur=False,
+                avoid_zones=None):
     """Route a cut clip through the right renderer for the chosen output format.
     vertical/auto -> 9:16 reframe, square -> 1:1 reframe, horizontal -> keep.
     ``force_strategy`` (e.g. 'WIDE'/'TRACK') pins every scene's layout — the
@@ -1638,6 +1655,9 @@ def render_clip(input_video, final_output_video, output_format="auto",
     ``no_blur`` renders every scene as a full-bleed tracked crop instead of
     letting wide/group shots fall into the blurred-backdrop layouts: with the
     panel already narrow, the blur would eat the picture rather than fill it.
+    ``avoid_zones`` are boxes (fractions of the source) the picture must not
+    show — in streamer mode the streamer's own cam box, which the bottom panel
+    is cropped from but must never display.
     ``watermark`` burns the free-plan mark into the result: inside the reframe
     encode on the v2 path, as a separate pass (apply_watermark) otherwise.
     ``subtitle_band`` (the job metadata's ``source_subtitle_band``) trims the
@@ -1648,7 +1668,7 @@ def render_clip(input_video, final_output_video, output_format="auto",
     try:
         return _render_clip(trimmed, final_output_video, output_format,
                             force_strategy, crop_overrides, watermark,
-                            reframe_aspect, no_blur)
+                            reframe_aspect, no_blur, avoid_zones)
     finally:
         if trimmed != input_video and os.path.exists(trimmed):
             os.remove(trimmed)
@@ -1656,7 +1676,7 @@ def render_clip(input_video, final_output_video, output_format="auto",
 
 def _render_clip(input_video, final_output_video, output_format,
                  force_strategy, crop_overrides, watermark, reframe_aspect=None,
-                 no_blur=False):
+                 no_blur=False, avoid_zones=None):
     if output_format == "horizontal":
         ok = finalize_clip_passthrough(input_video, final_output_video)
         if ok and watermark:
@@ -1669,7 +1689,8 @@ def _render_clip(input_video, final_output_video, output_format,
     return process_video_to_vertical(input_video, final_output_video, aspect_ratio=aspect,
                                      force_strategy=force_strategy,
                                      crop_overrides=crop_overrides,
-                                     watermark=watermark, no_blur=no_blur)
+                                     watermark=watermark, no_blur=no_blur,
+                                     avoid_zones=avoid_zones)
 
 
 # Watermark geometry, as fractions of the clip width/height.
@@ -1785,7 +1806,7 @@ def mark_delivery(final_path, marker=None):
 
 def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPECT_RATIO,
                               force_strategy=None, crop_overrides=None, watermark=False,
-                              no_blur=False):
+                              no_blur=False, avoid_zones=None):
     """
     Core logic to reframe a horizontal video to a target aspect ratio using
     scene detection and Active Speaker Tracking (MediaPipe).
@@ -1795,6 +1816,9 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
     classifier).
     no_blur: render every scene as a full-bleed tracked crop; no blurred
     backdrop, even on wide or face-less shots (the streamer bottom panel).
+    avoid_zones: boxes (fractions of the source) the picture must not show —
+    the streamer's own cam box in the bottom panel. Both engines slide the
+    tracked crop around them.
     """
     # v2 engine: analyze downscaled, render natively in ffmpeg. Any failure
     # falls back to the v1 frame loop below so a v2 edge case can't kill jobs.
@@ -1805,7 +1829,8 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
             result = reframe_v2.render(input_video, final_output_video, aspect_ratio,
                                        force_strategy=force_strategy,
                                        crop_overrides=crop_overrides,
-                                       watermark=watermark, no_blur=no_blur)
+                                       watermark=watermark, no_blur=no_blur,
+                                       avoid_zones=avoid_zones)
             print(f"   ⏱️ Reframe v2 total: {time.time() - t0:.1f}s")
             return result
         except Exception as e:
@@ -1947,6 +1972,17 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
                     stage_seconds['detect'] += time.time() - t_det
 
                 x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
+                if avoid_zones and x2 > x1:
+                    # Streamer mode: slide the window off the marked prevention
+                    # areas (the streamer's own cam box) without changing its
+                    # size, so the bottom panel never shows them.
+                    import streamer_layout as _avoid
+                    crop_px = x2 - x1
+                    x1, _ = _avoid.avoid_zones_crop_x(
+                        x1, crop_px, original_width, avoid_zones,
+                        crop_y=y1, crop_h=y2 - y1, src_h=original_height)
+                    x1 = int(x1)
+                    x2 = x1 + crop_px
 
                 # Crop
                 if y2 > y1 and x2 > x1:
@@ -2857,6 +2893,7 @@ if __name__ == '__main__':
     # normal reframe and before captions, so the caption style/position is
     # untouched. A bad value degrades to a plain clip instead of failing a job.
     streamer_rect = None
+    streamer_avoid = []
     streamer_bottom_aspect = None
     streamer_caption_seam = None
     streamer_source_size = (0, 0)
@@ -2866,6 +2903,17 @@ if __name__ == '__main__':
             streamer_rect = streamer_layout.clean_rect(
                 os.environ.get("STREAMER_RECT_JSON") or "{}")
             print(f"   🎭 Streamer layout armed: {streamer_rect}")
+            # Prevention areas: everything the bottom panel must never show
+            # (usually the whole cam box, which is wider than the crop shown on
+            # top). A bad value drops the zone, not the job.
+            try:
+                streamer_avoid = streamer_layout.clean_rect_list(
+                    os.environ.get("STREAMER_AVOID_JSON"))
+            except Exception as e:
+                print(f"   ⚠️ Prevention area ignored ({e})")
+                streamer_avoid = []
+            if streamer_avoid:
+                print(f"   🚫 Prevention area(s): {streamer_avoid}")
         except Exception as e:
             print(f"⚠️ Streamer layout ignored ({e}) — rendering normal clips.")
 
@@ -3215,6 +3263,7 @@ if __name__ == '__main__':
                         "rect": streamer_rect,
                         "bottom_aspect": round(streamer_bottom_aspect, 6),
                         "caption_seam": round(streamer_caption_seam, 6),
+                        "avoid": streamer_avoid,
                     }
             if source_subtitle_band:
                 clips_data['source_subtitle_band'] = source_subtitle_band
@@ -3250,14 +3299,17 @@ if __name__ == '__main__':
                     # Streamer mode: the bottom panel is reframed at the shape
                     # the marked box leaves, so it fills its panel edge to edge.
                     # TRACK is the only layout that never puts a blurred bed in
-                    # the panel; the marked streamer box is masked out of
-                    # detection (see _mask_streamer_area), so the crop follows
-                    # the video.
+                    # the panel; both marked boxes are masked out of detection
+                    # (see _mask_streamer_area), so the crop follows the video,
+                    # and the window is slid around the prevention area so the
+                    # streamer's own cam never shows in the panel.
                     bottom_aspect = streamer_bottom_aspect
                     success = render_clip(clip_temp_path, clip_final_path, output_format,
                                           subtitle_band=source_subtitle_band,
                                           reframe_aspect=bottom_aspect,
-                                          no_blur=bool(streamer_rect))
+                                          no_blur=bool(streamer_rect),
+                                          avoid_zones=(streamer_avoid
+                                                       if streamer_rect else None))
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
                     # Streamer split: compose the marked source crop over this

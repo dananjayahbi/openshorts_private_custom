@@ -160,6 +160,120 @@ def test_bottom_frame_detection_matches_the_expected_panel_shape():
 
 
 # --------------------------------------------------------------------------- #
+# Prevention area: the clip panel must never show the streamer's cam
+# --------------------------------------------------------------------------- #
+def test_an_absent_or_empty_prevention_area_means_none():
+    for raw in (None, "", "  ", "null", "[]", [], {}, "{}"):
+        assert streamer_layout.clean_rect_list(raw) == []
+
+
+def test_the_prevention_area_accepts_one_box_or_a_list():
+    box = {"x": 0.0, "y": 0.6, "w": 0.3, "h": 0.35}
+    assert streamer_layout.clean_rect_list(box) == [box]
+    assert streamer_layout.clean_rect_list(json.dumps(box)) == [box]
+    both = [box, {"x": 0.7, "y": 0.05, "w": 0.25, "h": 0.3}]
+    assert streamer_layout.clean_rect_list(both) == both
+    # Off-frame boxes are refused loud, like the streamer box itself.
+    with pytest.raises(ValueError):
+        streamer_layout.clean_rect_list({"x": 0.8, "y": 0.1, "w": 0.5, "h": 0.2})
+
+
+def test_the_crop_window_slides_off_a_corner_cam():
+    src_w, src_h, crop_w = 1920, 1080, 888
+    cam = {"x": 0.0, "y": 0.55, "w": 0.16, "h": 0.45}   # a bottom-left inset
+    x, overlap = streamer_layout.avoid_zones_crop_x(
+        0, crop_w, src_w, [cam], crop_h=src_h, src_h=src_h)
+    assert overlap == 0
+    assert x == pytest.approx(0.16 * src_w)            # just right of the cam
+    # A subject that keeps the window clear is left exactly where it was.
+    assert streamer_layout.avoid_zones_crop_x(
+        700, crop_w, src_w, [cam], crop_h=src_h, src_h=src_h) == (700, 0.0)
+    # Right-hand cam: the window stops just short of it.
+    cam = {"x": 0.84, "y": 0.55, "w": 0.16, "h": 0.45}
+    x, overlap = streamer_layout.avoid_zones_crop_x(
+        src_w, crop_w, src_w, [cam], crop_h=src_h, src_h=src_h)
+    assert overlap == 0
+    assert x == pytest.approx(0.84 * src_w - crop_w)
+
+
+def test_a_cam_that_leaves_no_clear_window_gets_the_smallest_overlap():
+    src_w, src_h, crop_w = 1920, 1080, 888
+    cam = {"x": 0.35, "y": 0.5, "w": 0.3, "h": 0.5}     # dead centre
+    x, overlap = streamer_layout.avoid_zones_crop_x(
+        0, crop_w, src_w, [cam], crop_h=src_h, src_h=src_h)
+    # 888px cannot fit in either 672px flank, so it takes the nearer side with
+    # the least cam on screen rather than jumping through the middle.
+    assert 0 < overlap < 0.3 * src_w
+    assert x in (0.0, pytest.approx(0.65 * src_w))
+
+
+def test_a_cam_outside_the_crop_height_is_ignored():
+    # A vertical source taller than the panel crop: a marker below the crop
+    # never appears, so it must not move the camera.
+    cam = {"x": 0.0, "y": 0.9, "w": 0.2, "h": 0.1}
+    assert streamer_layout.avoid_zones_crop_x(
+        200, 800, 1080, [cam], crop_y=0, crop_h=1312, src_h=1920) == (200, 0.0)
+
+
+def test_the_prevention_area_stays_inside_the_frame():
+    assert streamer_layout.avoid_zones_crop_x(-50, 800, 1920, []) == (0.0, 0.0)
+    assert streamer_layout.avoid_zones_crop_x(99999, 800, 1920, []) == (1120.0, 0.0)
+
+
+def test_the_api_refuses_a_prevention_area_outside_the_frame():
+    """Validation happens before any download/probe, so a typo is a clean 400."""
+    import asyncio
+    import httpx
+
+    app_module = pytest.importorskip("app")
+
+    async def _post(body):
+        transport = httpx.ASGITransport(app=app_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/api/process", json=body,
+                                     headers={"X-Gemini-Key": "k"})
+
+    resp = asyncio.run(_post({
+        "url": "https://example.invalid/watch?v=x",
+        "acknowledged": True,
+        "streamer": {"x": 0.2, "y": 0.1, "w": 0.5, "h": 0.5},
+        "streamer_avoid": {"x": 0.9, "y": 0.1, "w": 0.5, "h": 0.2},
+    }))
+    assert resp.status_code == 400
+    assert "outside the video" in resp.json()["detail"]
+
+
+def test_the_v2_render_steers_its_crop_around_the_prevention_area(monkeypatch, capsys):
+    """The real render path: the trajectory is rewritten before encoding."""
+    import reframe_v2
+    import main as main_module
+    from scenedetect import FrameTimecode
+
+    fps = 30.0
+    scenes = [(FrameTimecode(0, fps), FrameTimecode(90, fps))]
+    monkeypatch.setattr(main_module, "detect_scenes", lambda path: (scenes, fps))
+    monkeypatch.setattr(main_module, "get_video_resolution", lambda path: (1920, 1080))
+    # A calm camera: the window sits left of centre for the whole shot.
+    monkeypatch.setattr(reframe_v2, "_analyze_trajectory", lambda *a, **k: [500] * 90)
+    monkeypatch.setattr(reframe_v2.punch_in, "ENABLED", False)
+    monkeypatch.setattr(reframe_v2.layout_ranges, "write", lambda *a, **k: None)
+    captured = {}
+    monkeypatch.setattr(reframe_v2, "encode_scenes",
+                        lambda *a, **k: captured.setdefault("specs", a[1]))
+
+    # 320..672 on 1920 is inside the centred 888px crop window, so without the
+    # prevention area the cam would be in frame on every single frame.
+    cam = {"x": 320 / 1920, "y": 0.0, "w": 352 / 1920, "h": 1.0}
+    assert reframe_v2.render("clip.mp4", "out.mp4", 1080 / 1312,
+                             no_blur=True, avoid_zones=[cam]) is True
+
+    boxes = captured["specs"][0][3]
+    assert boxes and all(box[2] >= 672 for box in boxes)
+    assert len({box[0] for box in boxes}) == 1     # same size, only x moved
+    assert "Prevention area" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
 # Real composition (synthetic media only)
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
@@ -255,6 +369,62 @@ def test_a_16_9_box_composes_a_full_bleed_bottom_panel(tmp_path, monkeypatch):
     assert int(middle[1]) > 70 and int(middle[0]) < 90  # green (BGR)
 
 
+def test_the_top_panel_is_the_streamer_box_not_the_prevent_area(tmp_path, monkeypatch):
+    """Two separate selections: the display crop never borrows the prevent area."""
+    import inspect
+
+    import main
+
+    # Structurally: the composer that builds the top panel has no way to see a
+    # prevention area, so it can only ever crop the streamer box.
+    assert "avoid" not in inspect.signature(streamer_layout.apply).parameters
+    assert "avoid" not in inspect.signature(
+        streamer_layout.build_filtergraph).parameters
+
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        pytest.skip("needs ffmpeg/ffprobe")
+    import cv2
+
+    monkeypatch.setenv("FFMPEG_ENCODER", "x264")
+    source = str(tmp_path / "source.mp4")
+    clip = str(tmp_path / "clip.mp4")
+    # Black source with two clearly different areas: the streamer box (green,
+    # a tight crop) and the prevention area (red, the whole cam band on the
+    # left). The composed top panel must be green only.
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=10:d=2",
+        "-vf", "drawbox=x=200:y=40:w=110:h=60:color=green:t=fill,"
+               "drawbox=x=0:y=0:w=60:h=180:color=red:t=fill",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", source,
+    ], check=True)
+
+    rect = {"x": 200 / 320, "y": 40 / 180, "w": 110 / 320, "h": 60 / 180}
+    avoid = {"x": 0.0, "y": 0.0, "w": 60 / 320, "h": 1.0}
+    bottom = streamer_layout.bottom_aspect(rect, 320, 180)
+    assert main.render_clip(source, clip, "vertical", reframe_aspect=bottom,
+                            no_blur=True, avoid_zones=[avoid])
+    assert streamer_layout.apply(clip, source, 0.0, 2.0, rect, 320, 180)
+
+    frame = cv2.VideoCapture(clip).read()[1]
+    assert frame is not None
+    height = frame.shape[0]
+    top_h = int(round(height * streamer_layout.top_share(320, 180, rect)))
+
+    def red_pixels(img):
+        b, g, r = (img[:, :, i].astype(int) for i in range(3))
+        return int(((r > 150) & (g < 90) & (b < 90)).sum())
+
+    # Green only on top: the crop is the marked streamer box, even though the
+    # prevention area is a different (red) region of the same source.
+    top = frame[:top_h]
+    assert red_pixels(top) == 0
+    b, g, r = (int(frame[top_h // 2, 540, i]) for i in range(3))
+    assert g > 90 and r < 90, (b, g, r)
+    # And the clip's panel does not show the red cam band either.
+    assert red_pixels(frame[top_h:]) == 0
+
+
 def test_a_box_outside_the_split_range_keeps_the_normal_clip(tmp_path):
     source = str(tmp_path / "source.mp4")
     clip = str(tmp_path / "clip.mp4")
@@ -281,6 +451,7 @@ def test_the_detection_frame_blanks_the_marked_streamer_box(monkeypatch):
     frame = np.full((100, 200, 3), 255, dtype=np.uint8)
     monkeypatch.setenv("STREAMER_MODE", "1")
     monkeypatch.setenv("STREAMER_RECT_JSON", json.dumps(rect))
+    monkeypatch.delenv("STREAMER_AVOID_JSON", raising=False)
 
     masked = main._mask_streamer_area(frame)
 
@@ -301,11 +472,39 @@ def test_no_streamer_box_means_the_detection_frame_is_untouched(monkeypatch):
     frame = np.full((10, 10, 3), 7, dtype=np.uint8)
     monkeypatch.delenv("STREAMER_MODE", raising=False)
     monkeypatch.delenv("STREAMER_RECT_JSON", raising=False)
+    monkeypatch.delenv("STREAMER_AVOID_JSON", raising=False)
     assert main._mask_streamer_area(frame) is frame
 
     # A broken box is ignored rather than crashing a render.
     monkeypatch.setenv("STREAMER_MODE", "1")
     monkeypatch.setenv("STREAMER_RECT_JSON", "not json")
+    assert main._mask_streamer_area(frame) is frame
+
+
+def test_the_prevention_area_is_masked_too(monkeypatch):
+    import numpy as np
+    import main
+
+    frame = np.full((100, 200, 3), 255, dtype=np.uint8)
+    crop = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}        # the streamer crop
+    cam = {"x": 0.0, "y": 0.6, "w": 0.3, "h": 0.35}        # the whole cam
+    monkeypatch.setenv("STREAMER_MODE", "1")
+    monkeypatch.setenv("STREAMER_RECT_JSON", json.dumps(crop))
+    monkeypatch.setenv("STREAMER_AVOID_JSON", json.dumps([cam]))
+
+    masked = main._mask_streamer_area(frame)
+
+    assert int(masked[10:30, 20:60].max()) == 0     # the crop box
+    assert int(masked[60:95, 0:60].max()) == 0      # the prevention area
+    assert int(masked[40:55, 0:60].max()) == 255    # the gap between them
+    assert int(masked[:, 150:].max()) == 255        # untouched right side
+    # Only the prevention area, with no crop box, still masks it.
+    monkeypatch.delenv("STREAMER_RECT_JSON")
+    masked = main._mask_streamer_area(frame)
+    assert int(masked[60:95, 0:60].max()) == 0
+    assert int(masked[10:30, 20:60].max()) == 255
+    # A broken prevention area is ignored, not fatal.
+    monkeypatch.setenv("STREAMER_AVOID_JSON", "not json")
     assert main._mask_streamer_area(frame) is frame
 
 
@@ -342,6 +541,22 @@ def test_the_single_video_panel_has_the_marker_and_sends_the_box():
     assert "split ${Math.round(share * 100)}%" in marker
     assert "pointermove" in marker and "pointerup" in marker
     assert "onLoadedMetadata" in marker
+    # ...and it draws the prevention area as a second, independent box.
+    assert "initialAvoid" in marker
+    assert "prevent · not in the clip" in marker
+    assert "onSave?.(rect, avoid)" in marker
+    # The inactive box is a reference only: it must never take the pointer, or
+    # drawing the prevent area over the cam would move the streamer box instead.
+    assert marker.count("pointer-events-none border-dashed opacity-70") == 2
+    assert 'data-box="streamer"' in marker and 'data-box="avoid"' in marker
+    assert "drawing prevent area · kept out of the clip" in marker
+    assert "drawing streamer box · shown on top" in marker
+    assert "initialAvoid={streamerAvoid}" in media
+    assert "initialMode={marker?.focus}" in media
+    assert "openMarker('avoid')" in media
+    assert "2. {streamerAvoid ? 'edit prevent area'" in media
+    assert "streamerAvoid: (!bulk && streamed && streamerRect && streamerAvoid)" in media
+    assert "streamer_avoid: data.streamerAvoid" in _read(SRC, "App.jsx")
 
 
 def test_the_backend_validates_renders_and_tells_the_ai():
@@ -375,6 +590,16 @@ def test_the_backend_validates_renders_and_tells_the_ai():
     assert "streamer_prompt_note()" in main
     assert "STREAMER_NOTE" in worker
     assert 'os.getenv("STREAMER_MODE") == "1"' in worker
+    # Prevention area: the second box travels with the job, is masked out of
+    # detection and steers the bottom panel's crop in both reframe engines.
+    assert "streamer_avoid: Optional[str] = Form(None)" in server
+    assert 'env["STREAMER_AVOID_JSON"] = json.dumps(streamer_avoid_zones)' in server
+    assert "streamer_layout.clean_rect_list(streamer_avoid)" in server
+    assert "STREAMER_AVOID_JSON" in main
+    assert '"avoid": streamer_avoid' in main
+    assert "avoid_zones=(streamer_avoid" in main
+    assert "avoid_zones_crop_x(" in main          # v1 fallback
+    assert "avoid_zones_crop_x(" in _read(REPO, "reframe_v2.py")
     # The split is composed before captions/hook: those lines come after it.
     composed = main.index("streamer_layout.apply(")
     captioned = main.index("auto_hook_clip(clip_final_path", composed)

@@ -22,6 +22,13 @@ marker is validated against that range. The box is stored as fractions of the
 source frame (``x``, ``y``, ``w``, ``h``), so it survives any source resolution
 and any output scale.
 
+A second, independent box is the *prevention area*: the streamer's whole cam
+box (or any overlay) that the clip's panel must never show. It cannot reuse the
+streamer box because that one is often only a zoom on the face. The bottom
+panel's tracked crop is slid around the marked areas by
+``avoid_zones_crop_x``, and both boxes are blanked before the detectors run, so
+the camera neither locks onto the streamer nor frames it.
+
 The bottom panel is reframed at its own shape instead of the 9:16 delivery
 frame, so it fills its half edge to edge. Fitting a 9:16 reframe inside a wider
 panel left blurred bands either side of the picture; there is nothing left to
@@ -84,6 +91,89 @@ def clean_rect(raw):
     if values["x"] + values["w"] > 1.0001 or values["y"] + values["h"] > 1.0001:
         raise StreamerRectError("streamer rectangle ends outside the video")
     return {key: round(min(max(value, 0.0), 1.0), 6) for key, value in values.items()}
+
+
+def clean_rect_list(raw):
+    """Validate a JSON list of prevention areas (or a single box).
+
+    The dashboard marks one box today, but the renderer takes any number: a
+    stream can have a cam box *and* a chat/overlay panel the clip must not show.
+    Accepts a dict, a list, or the JSON string of either; empty/absent values
+    mean "no prevention area" (the default, unchanged behaviour).
+    """
+    if raw is None or raw == "" or raw == [] or raw == {}:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text in ("null", "{}", "[]"):
+            return []
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            raise StreamerRectError("prevention area must be valid JSON")
+    items = raw if isinstance(raw, list) else [raw]
+    return [clean_rect(item) for item in items]
+
+
+def avoid_zones_crop_x(x, crop_w, src_w, zones, crop_y=0.0, crop_h=None,
+                       src_h=None):
+    """Slide a crop window off the marked prevention areas.
+
+    The bottom panel is a tracked crop of the source. A streamed source still
+    has the streamer's own cam box somewhere in the frame, and the crop must not
+    show it — but the box is not something the face/person tracker knows about,
+    so the window is placed around it here.
+
+    ``zones`` are ``clean_rect`` boxes (fractions of the source). The window
+    keeps its width: it moves to the nearest position that shows no part of a
+    zone, and only keeps the smallest possible overlap when the zones leave no
+    clear window at all (they can cover most of the width). Zones outside the
+    window's vertical span are ignored, so a top-corner cam never moves a window
+    that already crops below it.
+
+    Returns ``(x, overlap)``: the new left edge in source pixels and the width
+    of prevention area still visible there (0 = clear).
+    """
+    crop_w = max(1.0, float(crop_w))
+    src_w = max(1.0, float(src_w))
+    max_x = max(0.0, src_w - crop_w)
+    x0 = min(max(0.0, float(x)), max_x)
+
+    bands = []
+    for zone in zones or []:
+        if crop_h is not None and src_h is not None:
+            top = zone["y"] * src_h
+            bottom = (zone["y"] + zone["h"]) * src_h
+            if bottom <= crop_y or top >= crop_y + crop_h:
+                continue
+        bands.append((zone["x"] * src_w, (zone["x"] + zone["w"]) * src_w))
+    if not bands:
+        return x0, 0.0
+
+    # Overlapping boxes are one band: the overlap is measured once.
+    bands.sort()
+    merged = [list(bands[0])]
+    for left, right in bands[1:]:
+        if left <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], right)
+        else:
+            merged.append([left, right])
+
+    def overlap(position):
+        return sum(max(0.0, min(position + crop_w, right) - max(position, left))
+                   for left, right in merged)
+
+    if overlap(x0) <= 0:
+        return x0, 0.0
+
+    # Only the edges matter: hard left, hard right, and each side of every
+    # band. Nearest-to-the-subject wins among the equally clear ones.
+    candidates = {0.0, max_x}
+    for left, right in merged:
+        candidates.add(min(max(right, 0.0), max_x))
+        candidates.add(min(max(left - crop_w, 0.0), max_x))
+    best = min(candidates, key=lambda c: (round(overlap(c), 3), abs(c - x0)))
+    return best, overlap(best)
 
 
 def marker_aspect(src_w, src_h, rect):

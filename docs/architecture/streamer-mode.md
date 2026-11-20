@@ -21,6 +21,21 @@ frame: the streamer's marked box on top, the viral clip on the bottom.
 - The box is stored as `{x, y, w, h}` fractions of the source frame. A saved
   box is tied to the source: changing the tab, link, file or collector item
   clears it.
+- A **prevention area** is a second, independent box: the streamer's whole cam
+  box (or a chat/overlay panel) that the clip's half must never show. It cannot
+  reuse the streamer box, because that one is usually only a zoom on the face
+  while the whole cam is much bigger. It is free-form (no split/aspect rules),
+  stored next to the streamer box, and optional — no prevention area means the
+  old behaviour. The modal has a `streamer box` / `prevent area` switch, shows
+  the prevention area dashed in red, and can copy the streamer box as a
+  starting point (`copy streamer box`). The panel also has its own
+  `mark prevent area` button, which opens the modal on that box.
+- Only the **selected** box takes the pointer. A drag always edits/draws the
+  selection on the current chip — the other box is a reference (dashed, faded,
+  `pointer-events: none`). Without that rule, drawing the prevent area over the
+  cam (which is exactly where the streamer box sits) would silently move the
+  streamer box instead, and the split would end up showing the prevent area.
+  The banner over the video states which selection a drag creates.
 - A file upload is played straight from the browser (`URL.createObjectURL`).
   A Collector item is played from its local `/collector/files/...` copy. A link
   is first downloaded into the Collector through
@@ -32,8 +47,9 @@ frame: the streamer's marked box on top, the viral clip on the bottom.
 
 `app.py` validates the box (`streamer_layout.clean_rect`), refuses a horizontal
 or square output, and puts `STREAMER_MODE=1` + `STREAMER_RECT_JSON` in the job
-environment. In `main.py`, after `render_clip` and **before** auto-hook and
-captions, `streamer_layout.apply` composes:
+environment (`STREAMER_AVOID_JSON` too when prevention areas are marked). In
+`main.py`, after `render_clip` and **before** auto-hook and captions,
+`streamer_layout.apply` composes:
 
 - **Top panel** — the marked source crop, cut from the source at the clip's
   `start`/`end` and scaled to fill `1080 x top`, where `top` comes from the
@@ -54,10 +70,21 @@ captions, `streamer_layout.apply` composes:
   engine can still fall back to v1 on failure.
 - **Subject tracking** — the marked box is the streamer, not the clip's
   subject. In streamer mode the face/person detectors run on a copy of the
-  frame with that box blanked, so the bottom half follows the viral content
-  instead of locking onto the streamer. The rendered frames keep every pixel;
-  the mask exists only inside detection. This applies to scene classification
-  (TRACK vs GENERAL) and to every layout that samples faces or people.
+  frame with **both** marked boxes blanked (the streamer crop and the whole
+  prevention area), so the bottom half follows the viral content instead of
+  locking onto the streamer. The rendered frames keep every pixel; the mask
+  exists only inside detection. This applies to scene classification (TRACK vs
+  GENERAL) and to every layout that samples faces or people.
+- **Prevention area** — the clip panel is a tracked crop of the same source, so
+  a streamer cam in the source would otherwise be framed into it. After the
+  camera trajectory is computed, each frame's crop window keeps its size and
+  slides to the nearest position that shows none of the marked areas
+  (`streamer_layout.avoid_zones_crop_x`). Only the horizontal position moves,
+  and a marker outside the crop's vertical span is ignored. If the areas leave
+  no clear window (they cover most of the width), the window takes the smallest
+  possible overlap instead of pushing the subject out of frame, and the job log
+  says how many frames could not be cleared. The v1 fallback loop applies the
+  same rule, so a v2 failure does not bring the cam back.
 - **Captions on the seam** — in streamer mode every caption event is anchored
   on the line between the two panels (`\an5` + `\pos` at the box's share of the
   height, e.g. 32% for a 16:9 box). A line of text therefore overlaps a little
@@ -90,14 +117,25 @@ commentary. Clip counts and length rules are unchanged.
 and at least 2% per side; the render also measures its real pixel aspect on that
 source and requires it to leave both panels between 15% and 85% of the height
 (2% rounding window). Anything else falls back to the normal clip. The output is
-forced to vertical. `POST /api/streamer/prepare` and
-`GET /api/streamer/source/{id}` back the link-to-Collector flow.
+forced to vertical.
+
+`streamer_avoid` takes one prevention box or a JSON list of them, in the same
+fractions. It needs `streamer`: without the split there is no clip panel to keep
+it out of, so it is ignored. An unreadable or off-frame value is a `400` at
+submit; the job itself never fails over it — `main.py` logs a bad value and
+drops it, keeping the split. The metadata's `streamer.avoid` records what the
+render used.
+
+`POST /api/streamer/prepare` and `GET /api/streamer/source/{id}` back the
+link-to-Collector flow.
 
 ## Tests
 
 `tests/test_streamer_layout.py` covers rectangle validation, the split geometry
 (9:8 = 50/50, 16:9 = ~32/68, square = 56/44, out-of-range rejected), the
-detection mask that keeps the tracker off the streamer, the pure filtergraph
-shape (native panel + the legacy blurred fit), a real ffmpeg composition with a
-16:9 box on synthetic clips, the caption seam (metadata -> ASS `\an5\pos`), the
-soft failure that keeps the normal clip, and the UI/backend wiring.
+detection mask that keeps the tracker off the streamer and the prevention area,
+the prevention-area crop steering (corner cams, an unavoidable centre cam, a
+marker outside the crop), the pure filtergraph shape (native panel + the legacy
+blurred fit), a real ffmpeg composition with a 16:9 box on synthetic clips, the
+caption seam (metadata -> ASS `\an5\pos`), the soft failure that keeps the
+normal clip, and the UI/backend wiring.

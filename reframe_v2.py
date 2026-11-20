@@ -29,6 +29,7 @@ import punch_in
 import screencast_layout
 import layout_ranges
 import split_layout
+import streamer_layout
 from ffmpeg_utils import (video_encode_args, blurred_backdrop, escape_filter_value,
                           QUALITY_FAST, METADATA_SCRUB)
 
@@ -641,7 +642,7 @@ def encode_scenes(input_video, specs, orig_w, orig_h, out_w, out_h, fps,
 
 def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
            force_strategy=None, crop_overrides=None, watermark=False,
-           no_blur=False):
+           no_blur=False, avoid_zones=None):
     """Full v2 reframe of one clip. Raises on failure (caller falls back).
 
     ``content_ranges`` pins which stretches (in this clip's timeline) show a
@@ -668,6 +669,13 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
     there leaves blur bands inside the picture instead of filling it, so the
     panel's scenes take the same crop TRACK uses. Unlike ``force_strategy``
     this is still automatic framing, so a v2 failure can fall back to v1.
+
+    ``avoid_zones`` are ``{x, y, w, h}`` boxes (fractions of the source) the
+    framed picture must not show: in streamer mode, the streamer's own cam box,
+    which is still part of the source the bottom panel is cropped from. The
+    tracker is kept off them separately (main's detection mask); here each
+    frame's crop window slides to the nearest position that excludes them,
+    keeping its size and the subject inside.
     """
     import main as m
     content_ranges = content_ranges or []
@@ -838,6 +846,31 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
             print(f"   🔍 Punch-in on {len(beats)} beat(s)")
 
     crop_w, crop_h = cameraman.crop_width, cameraman.crop_height
+
+    # Prevention areas (streamer mode): the bottom panel is a crop of the
+    # streamed source, which still contains the streamer's own cam box. The
+    # tracker was told to ignore it, and the window is slid around it here so
+    # the clip never shows it. Sizes stay the same; only x moves.
+    if avoid_zones:
+        avoid_crop_y = max(0.0, (orig_h - crop_h) / 2.0)
+        moved = blocked = 0
+        worst = 0.0
+        for index, x in enumerate(xs):
+            if x is None:
+                continue
+            new_x, overlap = streamer_layout.avoid_zones_crop_x(
+                x, crop_w, orig_w, avoid_zones, crop_y=avoid_crop_y,
+                crop_h=crop_h, src_h=orig_h)
+            if int(new_x) != int(x):
+                moved += 1
+            if overlap > 0:
+                blocked += 1
+                worst = max(worst, overlap)
+            xs[index] = int(new_x)
+        note = (f"; {blocked} frame(s) cannot clear it (up to "
+                f"{int(worst)}px still shown)" if blocked else "")
+        print(f"   \U0001f6ab Prevention area: crop moved off it on {moved} "
+              f"of {len(xs)} frame(s){note}")
 
     # ALTERNATE renders through the TRACK path: hard cuts between two speakers
     # are still just a list of crop x values, so no new filtergraph is needed.

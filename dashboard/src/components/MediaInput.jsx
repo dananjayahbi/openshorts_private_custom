@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film, Crosshair } from 'lucide-react';
+import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film, Crosshair, EyeOff } from 'lucide-react';
 import { track } from '../lib/analytics';
 import { apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
@@ -95,6 +95,9 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     // box on top. Single-video only; the rectangle is fractions of the source.
     const [streamed, setStreamed] = useState(false);
     const [streamerRect, setStreamerRect] = useState(null);
+    // The prevention area: the streamer's whole cam/overlay, which the clip's
+    // half must never show. Independent of the crop shown on top.
+    const [streamerAvoid, setStreamerAvoid] = useState(null);
     // {src, title, objectUrl?} while the marker modal is open.
     const [marker, setMarker] = useState(null);
     const [markerBusy, setMarkerBusy] = useState('');
@@ -173,6 +176,7 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     // must not silently reuse coordinates on different footage.
     useEffect(() => {
         setStreamerRect(null);
+        setStreamerAvoid(null);
         setPrepared(null);
     }, [mode, url, singleFile, pickedId]);
 
@@ -305,24 +309,24 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     // The marker needs real frames. Files play straight from the browser; a
     // link is downloaded into the Collector first (and then reused by the job).
-    const openMarker = async () => {
+    const openMarker = async (focus = 'streamer') => {
         setMarkerError('');
         setMarkerBusy('');
         try {
             if (mode === 'file') {
                 if (!singleFile) throw new Error('Choose a video file first.');
                 const objectUrl = URL.createObjectURL(singleFile);
-                setMarker({ src: objectUrl, title: singleFile.name, objectUrl });
+                setMarker({ src: objectUrl, title: singleFile.name, objectUrl, focus });
             } else if (mode === 'collector') {
                 if (!picked[0]) throw new Error('Pick a Collector video first.');
                 const item = await prepareCollectorItem(picked[0]);
-                setMarker({ src: getApiUrl(item.video), title: item.title });
+                setMarker({ src: getApiUrl(item.video), title: item.title, focus });
             } else {
                 if (!url.trim()) throw new Error('Paste a video link first.');
                 setMarkerBusy('Reading the link...');
                 const item = await prepareUrlSource(url.trim());
                 setPrepared({ id: item.collector_id || item.id, inputUrl: url.trim() });
-                setMarker({ src: getApiUrl(item.video), title: item.title });
+                setMarker({ src: getApiUrl(item.video), title: item.title, focus });
             }
         } catch (e) {
             setMarkerError(String(e.message || e).slice(0, 260));
@@ -358,6 +362,10 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         captions: captionsOn,
         styleProfileId: styleProfileId || null,
         streamer: (!bulk && streamed && streamerRect) ? streamerRect : null,
+        // The streamer's whole cam/overlay, kept out of the clip's half. Only
+        // meaningful with the split, so it travels with the streamer box.
+        streamerAvoid: (!bulk && streamed && streamerRect && streamerAvoid)
+            ? streamerAvoid : null,
     });
 
     const rememberOptions = () => {
@@ -501,8 +509,10 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                             <span className="block text-[11px] text-muted leading-snug">
                                 Splits the 9:16 output: the streamer&apos;s marked box on top, the
                                 viral clip on the bottom. Resize the box to its real shape — a 16:9
-                                cam leaves most of the frame to the clip. The AI also gets told
-                                this is a stream.
+                                cam leaves most of the frame to the clip. Then mark the <em>separate</em>{' '}
+                                prevent area — the streamer&apos;s whole cam/overlay — so the clip&apos;s
+                                half is framed around it and never shows it. The AI also gets told this
+                                is a stream.
                             </span>
                         </span>
                     </label>
@@ -510,16 +520,30 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                         <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-6">
                             <button
                                 type="button"
-                                onClick={openMarker}
+                                onClick={() => openMarker('streamer')}
                                 disabled={!!markerBusy}
+                                title="The crop shown in the top half; its shape sets the split"
                                 className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerRect ? '' : 'text-brass'}`}
                             >
                                 {markerBusy ? <Loader2 size={13} className="animate-spin" /> : <Crosshair size={13} />}
-                                {streamerRect ? 'edit streamer box' : 'mark streamer box'}
+                                1. {streamerRect ? 'edit streamer box' : 'mark streamer box'}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => openMarker('avoid')}
+                                disabled={!!markerBusy || !streamerRect}
+                                title={streamerRect ? 'Separate box: the streamer area the clip must never show' : 'Mark the streamer box first'}
+                                className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerAvoid ? '' : 'text-danger'}`}
+                            >
+                                <EyeOff size={13} />
+                                2. {streamerAvoid ? 'edit prevent area' : 'mark prevent area'}
                             </button>
                             {streamerRect ? (
                                 <span className="readout text-[11px] text-ok">
-                                    box saved ({Math.round(streamerRect.w * 100)}x{Math.round(streamerRect.h * 100)}%)
+                                    streamer box saved ({Math.round(streamerRect.w * 100)}x{Math.round(streamerRect.h * 100)}%)
+                                    {streamerAvoid
+                                        ? ' · prevent area set · clip framed around it'
+                                        : ' · prevent area not marked — the cam may still show in the clip'}
                                 </span>
                             ) : (
                                 <span className="readout text-[11px] text-muted">
@@ -982,8 +1006,11 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                 src={marker?.src}
                 title={marker?.title}
                 initialRect={streamerRect}
-                onSave={(rect) => {
+                initialAvoid={streamerAvoid}
+                initialMode={marker?.focus}
+                onSave={(rect, avoid) => {
                     setStreamerRect(rect);
+                    setStreamerAvoid(avoid);
                     closeMarker();
                 }}
                 onClose={closeMarker}

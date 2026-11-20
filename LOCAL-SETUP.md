@@ -146,20 +146,33 @@ Deleting is refused while an item is queued, downloading or splitting.
 On the Clip Generator, a single video can be toggled **streamed video** (bulk /
 queue runs do not offer it). A button opens a modal that plays the original
 source at its true aspect ratio; drag a box over the streamer's webcam/section.
-The box is locked to 9:16, can be moved and resized, and is saved as fractions
-of the source frame.
+The box can be moved and resized freely — its shape sets the split (a 16:9 cam
+takes about a third of the frame, 9:8 the even 50/50) — and is saved as
+fractions of the source frame.
 
 - A local upload plays straight from the browser. A Collector item plays its
   downloaded copy. A link is downloaded into the Collector first and then
   reused by the job (`POST /api/streamer/prepare`), so it is not fetched twice.
-- The render composes two 1080x960 halves: the marked streamer crop (fill +
-  centre crop) on top, the normal 9:16 reframe fitted over a blurred copy of
-  itself on the bottom. The viral clip's audio is kept.
-- Captions/hooks are burned after composition, so their style and position do
-  not change. The AI prompts are told the source is a stream (streamer
-  reactions matter, not long gameplay stretches).
-- If the box is invalid, not 9:16 on that source, or the composition fails, the
-  normal reframed clip is kept and the reason appears in the job log.
+- **Prevention area** (optional, second box in the same modal): mark the
+  streamer's whole cam or any overlay the clip's half must never show. The
+  clip's tracked crop is framed around it, so the streamer cam does not appear
+  in the bottom half. It is independent of the streamer box, which is often only
+  a zoom on the face. Pick the box with the `streamer box` / `prevent area`
+  chips: only the selected box takes the pointer, so dragging over the cam while
+  `prevent area` is selected draws that box instead of moving the streamer box.
+  `copy streamer box` gives a starting point.
+- The render composes the two panels into the normal 9:16 delivery: the marked
+  streamer crop on top, and the viral clip below rendered at the shape that is
+  left (full bleed, no blurred filler). The viral clip's audio is kept.
+- Both marked boxes are blanked for the face/person tracker, so the bottom half
+  follows the clip's own subject instead of the streamer.
+- Captions/hooks are burned after composition. Captions sit on the line between
+  the two panels; their style is otherwise unchanged. The AI prompts are told
+  the source is a stream (streamer reactions matter, not long gameplay
+  stretches).
+- If the box is invalid, its shape leaves a panel outside 15%–85% of the frame,
+  or the composition fails, the normal reframed clip is kept and the reason
+  appears in the job log.
 
 Details: `docs/architecture/streamer-mode.md`.
 
