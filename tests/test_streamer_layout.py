@@ -530,8 +530,11 @@ def test_the_single_video_panel_has_the_marker_and_sends_the_box():
     assert "mark streamer box" in media
     assert "/api/streamer/prepare" in media
     assert "streamer: (!bulk && streamed && streamerRect) ? streamerRect : null" in media
-    # Bulk mode never offers it, matching "single video processes only".
-    assert "if (next) setStreamed(false)" in media
+    # Bulk mode DOES offer it now: one mark per queued video. The old rule
+    # ("bulk never streams") is gone on purpose.
+    assert "if (next) setStreamed(false)" not in media
+    assert "bulkQueue" in media and "marks[entry.key]" in media
+    assert "openMarkerFor" in media
     assert "streamer: data.streamer ? JSON.stringify(data.streamer)" in app
 
     # The marker resizes freely; the box shape (not a fixed 9:8 lock) splits.
@@ -551,12 +554,19 @@ def test_the_single_video_panel_has_the_marker_and_sends_the_box():
     assert 'data-box="streamer"' in marker and 'data-box="avoid"' in marker
     assert "drawing prevent area · kept out of the clip" in marker
     assert "drawing streamer box · shown on top" in marker
-    assert "initialAvoid={streamerAvoid}" in media
+    assert "marks[marker.key]?.avoid" in media
     assert "initialMode={marker?.focus}" in media
     assert "openMarker('avoid')" in media
+    assert "openMarkerFor(entry, 'avoid')" in media
+    # Each bulk row carries its own two boxes; the batch options carry none.
+    assert "streamer: streamed ? (mark.rect || null) : null" in media
+    assert "streamerAvoid: streamed ? (mark.avoid || null) : null" in media
+    assert "streamer: null, streamerAvoid: null" in media
     assert "2. {streamerAvoid ? 'edit prevent area'" in media
     assert "streamerAvoid: (!bulk && streamed && streamerRect && streamerAvoid)" in media
     assert "streamer_avoid: data.streamerAvoid" in _read(SRC, "App.jsx")
+    # The batch loop prefers the ITEM's boxes over the shared options.
+    assert "...options,\n          ...item," in _read(SRC, "App.jsx")
 
 
 def test_the_backend_validates_renders_and_tells_the_ai():

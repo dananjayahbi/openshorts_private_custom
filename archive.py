@@ -61,7 +61,7 @@ from jsonfile import write_json_atomic
 # --------------------------------------------------------------------------- #
 # Paths and constants
 # --------------------------------------------------------------------------- #
-ARCHIVE_DIR = os.path.join(storage.STORAGE_DIR, "archive")
+ARCHIVE_DIR = storage.ARCHIVE_DIR
 FILES_DIR = os.path.join(ARCHIVE_DIR, "files")
 DB_FILE = os.path.join(ARCHIVE_DIR, "archive.db")
 
@@ -345,16 +345,26 @@ def _files_dir():
 
 
 def ensure():
-    """Create the tree and the index once per database path."""
-    os.makedirs(_files_dir(), exist_ok=True)
+    """Create the tree and the index once per database path.
+
+    A missing media drive is not an error here: the app still boots, the page
+    reports the drive as offline, and replugging it runs this again.
+    """
+    try:
+        os.makedirs(_files_dir(), exist_ok=True)
+    except OSError:
+        return False
     db_path = _db_file()
     if db_path in _ensured:
-        return
+        return True
     with _lock:
         if db_path in _ensured:
-            return
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=30)
+            return True
+        try:
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            conn = sqlite3.connect(db_path, timeout=30)
+        except (OSError, sqlite3.Error):
+            return False
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
@@ -362,6 +372,7 @@ def ensure():
         finally:
             conn.close()
         _ensured.add(db_path)
+        return True
 
 
 def _db():

@@ -56,8 +56,11 @@ def test_it_says_preparing_the_environment_between_videos():
 def test_a_failed_video_still_shows_the_pipeline_line():
     app = _read("App.jsx")
     assert "const tail = [...lastLogs].reverse()" in app
-    assert "const error = tail ? String(tail).slice(0, 300)" in app
+    assert "String(tail).slice(0, 300)" in app
     assert "setJobError(error)" in app
+    # A wedged job gets its own explanation instead of a blank log tail.
+    assert "No progress for" in app
+    assert "return 'stalled'" in app
 
 
 def test_failed_rows_can_be_retried_without_rerunning_the_whole_queue():

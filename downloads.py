@@ -43,9 +43,14 @@ _split_queue = []
 
 
 def ensure():
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    if not os.path.exists(INDEX_FILE):
-        write_json_atomic(INDEX_FILE, [])
+    """Create the tree. A missing media drive is reported, never raised."""
+    try:
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        if not os.path.exists(INDEX_FILE):
+            write_json_atomic(INDEX_FILE, [])
+    except OSError:
+        return False
+    return True
 
 
 def valid_id(item_id) -> bool:

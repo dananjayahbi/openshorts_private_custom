@@ -1,4 +1,13 @@
 import os
+
+from dotenv import load_dotenv
+
+# Load .env BEFORE importing modules that resolve paths and flags at import
+# time (storage, collector, archive, clip_state, settings_store...). A launcher
+# or a test that sets a variable in the real environment still wins:
+# load_dotenv does not override existing values.
+load_dotenv()
+
 import llm_backend
 import platform_compat
 import prompt_store
@@ -33,7 +42,6 @@ import asyncio
 import signal
 import socket
 from datetime import datetime, timezone, timedelta
-from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
@@ -50,18 +58,28 @@ import media_auth
 import remote_worker
 from jsonfile import write_json_atomic
 
-load_dotenv()
-
 # Constants
-# Everything the app stores lives under one Storage/ tree (see storage.py):
-# videos/<job_id>/ is served at /videos, thumbnails/ at /thumbnails, and
-# uploads/ holds the transient sources. Keeping the old names as aliases means
-# every existing os.path.join(OUTPUT_DIR, job_id, ...) still points at the
-# right place while the layout on disk is now a real media library.
+# Large media lives under the media root (see storage.py): videos/<job_id>/ is
+# served at /videos, uploads/ holds the transient sources, the Collector and
+# the Archive live beside them. Small state (settings, profiles, gallery flags,
+# Thumbnail Studio sessions) stays next to the app so unplugging the media
+# drive does not take the whole install with it.
 UPLOAD_DIR = storage.UPLOADS_DIR
 OUTPUT_DIR = storage.VIDEOS_DIR
 THUMBNAILS_DIR = storage.THUMBNAILS_DIR
 storage.ensure()
+
+
+def _require_media():
+    """503 with a plain explanation when the media drive is unplugged.
+
+    Every source of a new job is written to the media tree, so accepting a
+    submission without that drive would fail halfway. Calls ``ensure_media``
+    first: a drive plugged back in needs no restart.
+    """
+    storage.ensure_media()
+    if not storage.media_available():
+        raise HTTPException(status_code=503, detail=storage.MEDIA_OFFLINE_MESSAGE)
 
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
@@ -82,12 +100,12 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024 if MAX_FILE_SIZE_MB > 0 els
 # where covers, sounds and hashtags actually get chosen. The UI must say so —
 # a user who expects a published post and finds a draft will read it as a bug.
 TIKTOK_POST_MODE = os.environ.get("TIKTOK_POST_MODE", "MEDIA_UPLOAD").strip()
-# Ceiling for the working directory once it lives on a persistent volume: the
-# age-based sweep alone can't stop a burst of long videos from filling the disk.
-# 0 disables the cap.
-OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "25"))
+# Ceiling for the working directory. 0 (the default) keeps everything: this
+# build is a personal library, and deleting finished clips to win a few GB is
+# the behaviour that lost a day of renders. A hosted deploy can still set a cap.
+OUTPUT_MAX_GB = int(os.environ.get("OUTPUT_MAX_GB", "0") or 0)
 # Same idea for source uploads, which are the biggest single files on disk.
-UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "15"))
+UPLOADS_MAX_GB = int(os.environ.get("UPLOADS_MAX_GB", "0") or 0)
 # Pre-flight quality gate: warn before processing a YouTube source below this
 # height (0 disables). Only applies to URLs; uploads are whatever the user gave.
 QUALITY_GATE_MIN_HEIGHT = int(os.environ.get("QUALITY_GATE_MIN_HEIGHT", "720"))
@@ -152,12 +170,13 @@ for _stream in (sys.stdout, sys.stderr):
 # self-hosted BYOK app does today (no extra dependencies required).
 BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "").lower() in ("1", "true", "yes")
 
-# Job/file retention (issue #46). Self-host defaults to 24h: the 1h sweep kept
-# deleting finished projects under users who never touched their env, and the
-# OUTPUT_MAX_GB / UPLOADS_MAX_GB caps below already bound the disk. Cloud keeps
-# the tight default because clips are archived to R2 as soon as a job finishes.
+# Job/file retention (issue #46). Self-host keeps everything by default
+# (0 = never delete): the old 24h clock is what silently emptied a day of
+# renders. Cloud keeps the tight default because clips are archived to R2 as
+# soon as a job finishes. Any sweep below treats a non-positive value as
+# "keep forever".
 JOB_RETENTION_SECONDS = int(
-    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "86400")
+    os.environ.get("JOB_RETENTION_SECONDS", "3600" if BILLING_ENABLED else "0")
 )
 # The retained download of a URL job (--keep-original) is the one artifact that
 # is a full copy of someone else's video rather than something we made, so it
@@ -2859,7 +2878,13 @@ def _job_render_time(job_path):
 
 
 def _sweep_expired_job_dirs(now):
-    """Drop job dirs older than JOB_RETENTION_SECONDS, except live jobs."""
+    """Drop job dirs older than JOB_RETENTION_SECONDS, except live jobs.
+
+    A non-positive retention means "keep forever": the default on a personal
+    install, so a finished render is never deleted behind the user's back.
+    """
+    if JOB_RETENTION_SECONDS <= 0 or not storage.media_available():
+        return
     for job_id in os.listdir(OUTPUT_DIR):
         # Not a job: the thumbnails dir backs a StaticFiles mount, so
         # deleting it would 500 every /thumbnails request until reboot.
@@ -2881,7 +2906,10 @@ def _sweep_expired_job_dirs(now):
 
 def _sweep_expired_uploads(now):
     """Drop source uploads older than JOB_RETENTION_SECONDS, except the source
-    of a job that is still queued or running."""
+    of a job that is still queued or running. Non-positive retention keeps
+    every source."""
+    if JOB_RETENTION_SECONDS <= 0 or not storage.media_available():
+        return
     for filename in os.listdir(UPLOAD_DIR):
         file_path = os.path.join(UPLOAD_DIR, filename)
         try:
@@ -2899,7 +2927,7 @@ def _enforce_uploads_size_cap():
     but they're the biggest files on disk — often several GB each.
     """
     cap = UPLOADS_MAX_GB * 1024 ** 3
-    if cap <= 0:
+    if cap <= 0 or not storage.media_available():
         return
     used = _dir_size(UPLOAD_DIR)
     if used <= cap:
@@ -2928,7 +2956,7 @@ def _enforce_uploads_size_cap():
 def _enforce_output_size_cap():
     """Delete the oldest job dirs while OUTPUT_DIR is over OUTPUT_MAX_GB."""
     cap = OUTPUT_MAX_GB * 1024 ** 3
-    if cap <= 0:
+    if cap <= 0 or not storage.media_available():
         return
     used = _dir_size(OUTPUT_DIR)
     if used <= cap:
@@ -2963,6 +2991,8 @@ def _sweep_retained_sources(now=None):
     the user's own file and ages out with the job like everything else. Yields
     the job ids it emptied. A no-op unless the knob is set below the job clock.
     """
+    if SOURCE_RETENTION_SECONDS <= 0 or not storage.media_available():
+        return
     if SOURCE_RETENTION_SECONDS >= JOB_RETENTION_SECONDS:
         return
     now = time.time() if now is None else now
@@ -2994,6 +3024,9 @@ async def cleanup_jobs():
         try:
             await asyncio.sleep(300) # Check every 5 minutes
             now = time.time()
+            # A media drive that was unplugged at boot and plugged back in
+            # later gets its tree (re)created here, so every path works again.
+            storage.ensure_media()
             
             # Simple directory cleanup based on modification time
             # Check OUTPUT_DIR
@@ -3014,7 +3047,8 @@ async def cleanup_jobs():
             try:
                 saas_expired = [
                     jid for jid, jdata in list(saas_jobs.items())
-                    if jdata.get("status") in ("completed", "failed")
+                    if JOB_RETENTION_SECONDS > 0
+                    and jdata.get("status") in ("completed", "failed")
                     and jdata.get("output_dir")
                     and os.path.isdir(jdata["output_dir"])
                     and now - os.path.getmtime(jdata["output_dir"]) > JOB_RETENTION_SECONDS
@@ -4521,6 +4555,7 @@ from restoring_static import RestoringStaticFiles
 import media_auth
 app.mount("/videos", RestoringStaticFiles(
     directory=OUTPUT_DIR,
+    check_dir=False,
     guard=_media_guard,
     authorize=lambda path, scope: _authorize_media("videos", path, scope),
     restorer=lambda job_id: _restore_for_public_path(job_id)), name="videos")
@@ -4530,7 +4565,7 @@ app.mount("/videos", RestoringStaticFiles(
 # job directory.
 # Same allowlist as /videos: images only, never a session's scratch files.
 app.mount("/thumbnails", RestoringStaticFiles(
-    directory=THUMBNAILS_DIR, guard=media_auth.is_servable,
+    directory=THUMBNAILS_DIR, check_dir=False, guard=media_auth.is_servable,
     authorize=lambda path, scope: _authorize_media("thumbnails", path, scope)), name="thumbnails")
 
 # Collector media (downloaded sources and their thumbnails). The mount's
@@ -4540,7 +4575,8 @@ collector.ensure()
 downloads.ensure()
 archive.ensure()
 app.mount("/collector", RestoringStaticFiles(
-    directory=collector.COLLECTOR_DIR, guard=media_auth.is_servable), name="collector")
+    directory=collector.COLLECTOR_DIR, check_dir=False,
+    guard=media_auth.is_servable), name="collector")
 
 
 def _safe_under(base_dir: str, user_rel_path: str) -> Optional[str]:
@@ -5289,11 +5325,20 @@ async def worker_done(job_id: str, request: Request):
 
 @app.get("/api/config")
 async def get_config():
+    # A drive plugged back in gets its tree recreated even if no job is
+    # submitted: the dashboard polls this endpoint and shows the banner.
+    storage.ensure_media()
     return {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        # 0 means "keep everything": the dashboard renders that as unlimited
+        # instead of "deleted after 0 seconds".
+        "outputMaxGb": OUTPUT_MAX_GB,
+        "uploadsMaxGb": UPLOADS_MAX_GB,
+        # Where the big media tree lives, and whether that drive is connected.
+        "storage": storage.status(),
         # Where this API is reachable from a user's machine. The dashboard is
         # served on another port and does not proxy /mcp, so the agent snippets
         # need the absolute origin; empty means "derive it in the browser".
@@ -5586,22 +5631,30 @@ async def get_overview():
                  if str(j.get("status") or "").lower() not in finished)
 
     disk = {}
+    online = storage.media_available()
+    # Measure the app's own footprint across both roots (state + media), not
+    # the drive letter alone: the media drive can be a different disk now.
+    roots = {os.path.abspath(storage.STORAGE_DIR), os.path.abspath(storage.MEDIA_DIR)}
+    usage_root = storage.MEDIA_DIR if online else storage.STORAGE_DIR
     try:
-        usage = shutil.disk_usage(storage.STORAGE_DIR)
+        usage = shutil.disk_usage(usage_root)
+        used = sum(_dir_size(path) for path in roots if os.path.isdir(path))
         # "used" is this app's own footprint, "total" is the room it has left:
         # the meter answers "how much of the space still available does the
         # library occupy", not "how full is a 310 GB drive" (which read as
         # almost empty while only 22 GB was free). capacity/free keep the raw
         # drive numbers for the caption.
         disk = {
-            "usedGb": round(_dir_size(storage.STORAGE_DIR) / 1024 ** 3, 2),
+            "usedGb": round(used / 1024 ** 3, 2),
             "freeGb": round(usage.free / 1024 ** 3, 1),
             "totalGb": round(usage.free / 1024 ** 3, 1),
             "capacityGb": round(usage.total / 1024 ** 3, 1),
-            "path": os.path.abspath(storage.STORAGE_DIR),
+            "path": os.path.abspath(usage_root),
+            "online": online,
+            "separate": bool(storage.status()["separate"]),
         }
     except OSError:
-        pass
+        disk = {"online": online, "path": os.path.abspath(usage_root)}
 
     return {
         "videos": videos,
@@ -5876,6 +5929,9 @@ def _collector_thumb(video_path, thumb_path):
 
 @app.get("/api/collector")
 async def collector_list():
+    storage.ensure_media()
+    if not storage.media_available():
+        return {"items": [], "queued": 0, "media_offline": True}
     items = await asyncio.to_thread(collector.list_items)
     return {"items": items, "queued": sum(1 for i in items if i["queued"])}
 
@@ -5883,6 +5939,7 @@ async def collector_list():
 @app.post("/api/collector")
 async def collector_add(request: Request):
     """Add a link: metadata + thumbnail only, no video bytes."""
+    _require_media()
     try:
         body = await request.json()
     except Exception:
@@ -5900,6 +5957,7 @@ async def collector_add(request: Request):
 @app.post("/api/collector/upload")
 async def collector_upload(file: UploadFile = File(...)):
     """Store a local video in the collector (streamed to disk)."""
+    _require_media()
     try:
         return await asyncio.to_thread(
             collector.add_upload, file.filename or "video.mp4", file,
@@ -5914,6 +5972,7 @@ async def collector_upload(file: UploadFile = File(...)):
 @app.post("/api/collector/{item_id}/download")
 async def collector_download(item_id: str):
     """Fetch the video now, in the background, and report progress on the list."""
+    _require_media()
     try:
         return collector.start_download(item_id)
     except KeyError:
@@ -5935,6 +5994,7 @@ async def collector_queue(item_id: str, request: Request):
 
 @app.delete("/api/collector/{item_id}")
 async def collector_remove(item_id: str):
+    _require_media()
     if not await asyncio.to_thread(collector.delete, item_id):
         raise HTTPException(status_code=404, detail="Collector item not found")
     return {"deleted": item_id}
@@ -5950,6 +6010,7 @@ async def streamer_prepare(request: Request):
     carries the collector id, and the job can process that item directly
     instead of downloading the same source a second time.
     """
+    _require_media()
     body = await _request_json(request)
     url = str(body.get("url") or "").strip()
     if not url:
@@ -5996,6 +6057,9 @@ async def streamer_source(item_id: str):
 # --- Download Manager: full sources in temp, split into the Collector --------
 @app.get("/api/downloads")
 async def downloads_list():
+    storage.ensure_media()
+    if not storage.media_available():
+        return {"items": [], "media_offline": True}
     items = await asyncio.to_thread(downloads.list_items)
     return {"items": items}
 
@@ -6003,6 +6067,7 @@ async def downloads_list():
 @app.post("/api/downloads")
 async def downloads_add(request: Request):
     """Add one link, or several (one per line), and start downloading them."""
+    _require_media()
     try:
         body = await request.json()
     except Exception:
@@ -6089,6 +6154,7 @@ def _archive_job(fn, *args, **kwargs):
 
 
 async def _archive_call(fn, *args, **kwargs):
+    _require_media()
     try:
         return await _archive_job(fn, *args, **kwargs)
     except Exception as exc:  # noqa: BLE001 - mapped to an HTTP answer
@@ -6100,6 +6166,7 @@ async def archive_items(limit: int = 48, page: int = 1, q: str = "",
                         date: str = "any", date_from: str = "", date_to: str = "",
                         vault: str = "any", state: str = "any",
                         platform: str = "any", sort: str = "newest"):
+    _require_media()
     try:
         return await asyncio.to_thread(
             archive.list_items, limit=limit, page=page, q=q, date=date,
@@ -6448,6 +6515,7 @@ async def process_endpoint(
     streamer: Optional[str] = Form(None),
     streamer_avoid: Optional[str] = Form(None),
 ):
+    _require_media()
     api_key = await resolve_gemini(request)
     # Agent flow: a supplied clip plan (or a transcription-only run) needs no
     # model at all - the caller is the moment picker. Everything else still
@@ -9936,6 +10004,7 @@ async def _probe_thumbnail_url(request, url, user):
 async def _download_thumbnail_source(url, session_id, paid_allowed=True, cap_minutes=None):
     """Download a Thumbnail Studio link in a worker thread (never on the event
     loop) and record any per-GB proxy bytes in the ledger, like a job does."""
+    _require_media()
     from main import download_youtube_video
     route = {}
     loop = asyncio.get_event_loop()
@@ -9970,6 +10039,7 @@ async def _save_thumbnail_upload(file, session_id):
     """Stream an uploaded file to UPLOAD_DIR (optionally size-capped) and, in
     cloud mode, probe its length. Returns ``(path, minutes)``; the file is
     deleted when it is refused (too big, unreadable or too long)."""
+    _require_media()
     # basename() stops a "../../x" filename from escaping UPLOAD_DIR; the
     # chunked read caps memory so a huge body can't OOM.
     safe_name = _clamp_upload_name(os.path.basename(file.filename or "upload") or "upload")
@@ -11047,6 +11117,14 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
             date, (date_from or "").strip(), (date_to or "").strip())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    storage.ensure_media()
+    if not storage.media_available():
+        # Unplugged media drive: an empty library with a reason beats a 500.
+        return {            "clips": [], "total": 0,
+            "counts": {"unused": 0, "used": 0, "archived": 0},
+            "limit": limit, "page": 1, "pages": 0, "offset": 0,
+            "has_more": False, "media_offline": True,
+        }
     owner = await _owner_id(request) if BILLING_ENABLED else None
     thumbs = os.path.basename(THUMBNAILS_DIR)
 
@@ -11532,6 +11610,7 @@ async def saasshorts_actor_upload(request: Request, file: UploadFile = File(...)
     # SaaSShorts is part of the paid product — require entitlement in cloud mode
     # (no-op for self-host) so anonymous callers can't drive server work.
     await require_managed_entitlement(request)
+    _require_media()
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 

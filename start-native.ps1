@@ -61,31 +61,39 @@ $logDir = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 # --- environment -----------------------------------------------------------
-# One Storage/ tree holds every video, thumbnail and upload (storage.py). The
-# API keeps the relative path (so a remote worker sees the same layout); the
-# renderer needs it absolute because its cwd is render-service/.
-$storageRoot = Join-Path $root 'Storage'
-foreach ($sub in @('videos', 'thumbnails', 'uploads')) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $storageRoot $sub) | Out-Null
+# Two roots (storage.py): small state next to the app, big media on the external
+# drive. The API keeps relative paths for state so a remote worker sees the same
+# layout; the renderer needs the media path absolute (its cwd is render-service/).
+$stateRoot = if ($env:OPENSHORTS_STORAGE) { $env:OPENSHORTS_STORAGE } else { Join-Path $root 'Storage' }
+$mediaRoot = if ($env:OPENSHORTS_MEDIA) { $env:OPENSHORTS_MEDIA } else { 'D:\OpenShorts\Storage' }
+New-Item -ItemType Directory -Force -Path (Join-Path $stateRoot 'thumbnails') | Out-Null
+$mediaDrive = [System.IO.Path]::GetPathRoot($mediaRoot)
+if (Test-Path $mediaDrive) {
+    foreach ($sub in @('videos', 'uploads', 'downloads', 'collector', 'archive')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $mediaRoot $sub) | Out-Null
+    }
+} else {
+    Write-Host "media drive not connected: $mediaRoot" -ForegroundColor Yellow
 }
-# To keep the clips on another disk, export OPENSHORTS_STORAGE (absolute) in
-# the shell BEFORE this script and point OUTPUT_DIR at its videos/ folder here.
+
+$env:OPENSHORTS_STORAGE = $stateRoot
+$env:OPENSHORTS_MEDIA = $mediaRoot
 
 $env:HF_HOME = Join-Path $root '.cache\huggingface'
 $env:HF_HUB_DISABLE_XET = '1'
 $env:PYTORCH_CUDA_ALLOC_CONF = 'expandable_segments:True'
 $env:TRANSNETV2_DEVICE = 'cuda'
-$env:PUBLIC_API_URL = "http://localhost:$apiPort"
+$env:PUBLIC_API_URL = "http://127.0.0.1:$apiPort"
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUTF8 = '1'
 $env:FONTCONFIG_FILE = Join-Path $root 'fonts\fonts.local.conf'
 
 $env:PORT = "$renderPort"
 $env:REMOTION_BUNDLE_PATH = Join-Path $root 'remotion'
-$env:OUTPUT_DIR = Join-Path $storageRoot 'videos'
+$env:OUTPUT_DIR = Join-Path $mediaRoot 'videos'
 
-$env:VITE_PROXY_TARGET = "http://localhost:$apiPort"
-$env:VITE_RENDER_TARGET = "http://localhost:$renderPort"
+$env:VITE_PROXY_TARGET = "http://127.0.0.1:$apiPort"
+$env:VITE_RENDER_TARGET = "http://127.0.0.1:$renderPort"
 
 # --- backend ---------------------------------------------------------------
 Write-Host "starting api       :$apiPort" -ForegroundColor Cyan

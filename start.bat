@@ -52,26 +52,39 @@ if not exist "fonts\fonts.local.conf" (
     echo        Run setup-native.ps1 to generate it.
 )
 
-rem --- one media root for the whole app ---------------------------------------
+rem --- storage roots ------------------------------------------------------------
+rem  State (settings, profiles, gallery flags, Thumbnail Studio) stays next to
+rem  the app. Big media (renders, sources, Collector, archive) goes to the
+rem  external drive; if it is unplugged the API still starts and the dashboard
+rem  says so, and replugging it needs no restart.
 if "%OPENSHORTS_STORAGE%"=="" set "OPENSHORTS_STORAGE=%CD%\Storage"
-if not exist "%OPENSHORTS_STORAGE%\videos"     mkdir "%OPENSHORTS_STORAGE%\videos"
+if "%OPENSHORTS_MEDIA%"==""   set "OPENSHORTS_MEDIA=D:\OpenShorts\Storage"
 if not exist "%OPENSHORTS_STORAGE%\thumbnails" mkdir "%OPENSHORTS_STORAGE%\thumbnails"
-if not exist "%OPENSHORTS_STORAGE%\uploads"    mkdir "%OPENSHORTS_STORAGE%\uploads"
+if not exist "%OPENSHORTS_MEDIA%" mkdir "%OPENSHORTS_MEDIA%" 2>nul
+if exist "%OPENSHORTS_MEDIA%" (
+    if not exist "%OPENSHORTS_MEDIA%\videos"    mkdir "%OPENSHORTS_MEDIA%\videos"
+    if not exist "%OPENSHORTS_MEDIA%\uploads"   mkdir "%OPENSHORTS_MEDIA%\uploads"
+    if not exist "%OPENSHORTS_MEDIA%\collector" mkdir "%OPENSHORTS_MEDIA%\collector"
+    if not exist "%OPENSHORTS_MEDIA%\archive"   mkdir "%OPENSHORTS_MEDIA%\archive"
+) else (
+    echo [WARN] Media drive not connected: %OPENSHORTS_MEDIA%
+    echo        The dashboard will start; plug the drive in before rendering.
+)
 
 rem --- environment inherited by every window ---------------------------------
 set "HF_HOME=%CD%\.cache\huggingface"
 set "HF_HUB_DISABLE_XET=1"
 set "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 set "TRANSNETV2_DEVICE=cuda"
-set "PUBLIC_API_URL=http://localhost:%API_PORT%"
+set "PUBLIC_API_URL=http://127.0.0.1:%API_PORT%"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
 set "FONTCONFIG_FILE=%CD%\fonts\fonts.local.conf"
 set "PORT=%RENDER_PORT%"
 set "REMOTION_BUNDLE_PATH=%CD%\remotion"
-set "OUTPUT_DIR=%OPENSHORTS_STORAGE%\videos"
-set "VITE_PROXY_TARGET=http://localhost:%API_PORT%"
-set "VITE_RENDER_TARGET=http://localhost:%RENDER_PORT%"
+set "OUTPUT_DIR=%OPENSHORTS_MEDIA%\videos"
+set "VITE_PROXY_TARGET=http://127.0.0.1:%API_PORT%"
+set "VITE_RENDER_TARGET=http://127.0.0.1:%RENDER_PORT%"
 
 echo.
 echo   OpenShorts

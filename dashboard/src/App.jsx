@@ -394,6 +394,37 @@ function App() {
   // It renders instead of the single-job view and survives tab switches while
   // this browser tab is open.
   const [batch, setBatch] = useState(null);
+  // The queue's per-video summary (state + the server's error line). Opened
+  // automatically when a finished queue has failures, so an overnight run
+  // leaves a readable list instead of only the current row.
+  const [batchDetails, setBatchDetails] = useState(false);
+  useEffect(() => {
+    if (batch && !batch.running && batch.rows.some((row) => row.state === 'failed')) {
+      setBatchDetails(true);
+    }
+  }, [batch]);
+  // The media tree can live on an external drive. Poll the config so the
+  // banner appears when it is unplugged and disappears when it is back.
+  const [mediaOffline, setMediaOffline] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    let timer = null;
+    const check = async () => {
+      try {
+        const res = await apiFetch('/api/config');
+        if (res.ok) {
+          const cfg = await res.json();
+          if (alive) setMediaOffline(Boolean(cfg?.storage && cfg.storage.online === false));
+        }
+      } catch { /* keep the last verdict */ }
+      if (alive) timer = setTimeout(check, 30000);
+    };
+    check();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
   // {item, at}: a Collector card's "Process" hands its video to the Clip
   // Generator instead of submitting a job behind the user's back.
   const [collectorPrefill, setCollectorPrefill] = useState(null);
@@ -406,6 +437,28 @@ function App() {
   // two loops over the same videos (duplicate jobs, the same item processed
   // twice). This is the guard the state alone cannot provide.
   const batchRunRef = useRef(false);
+  // Keep the machine awake while an overnight queue runs. Best effort: a tab
+  // that is backgrounded loses the lock, so it is re-requested when visible.
+  useEffect(() => {
+    if (!batch?.running || typeof navigator === 'undefined' || !navigator.wakeLock) {
+      return undefined;
+    }
+    let sentinel = null;
+    const request = async () => {
+      try {
+        sentinel = await navigator.wakeLock.request('screen');
+      } catch { /* the OS refused; the queue still runs */ }
+    };
+    request();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && !sentinel) request();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      try { sentinel?.release(); } catch { /* already released */ }
+    };
+  }, [batch?.running]);
   const [activeTab, setActiveTab] = useState(() => tabFromPath(window.location.pathname)); // see lib/routes.js
   // Mobile only: the full nav lives in a drawer behind the header's menu button.
   const [navOpen, setNavOpen] = useState(false);
@@ -1396,11 +1449,15 @@ function App() {
     }
   };
 
-  // Poll one job to its end. ``onSnapshot`` gets every status payload, so the
-  // batch view can show the same per-video log tail the single-job view does
-  // instead of only "processing…" with no diagnosis when a run fails.
+  // Poll one job to its end. A render that stops reporting progress for
+  // ``STALL_MS`` is cancelled and returned as 'stalled': one wedged job must
+  // never hold an overnight queue. ``onSnapshot`` gets every payload, so the
+  // batch view can show the same per-video log tail the single flow does.
+  const STALL_MS = 45 * 60 * 1000;
   const waitForJob = async (id, onSnapshot) => {
     const started = Date.now();
+    let lastActivity = Date.now();
+    let signature = '';
     // A 6 h ceiling: a very long source can legitimately take a while, and the
     // server's own job timeout is the real limit.
     while (Date.now() - started < 6 * 3600 * 1000) {
@@ -1410,9 +1467,18 @@ function App() {
         if (!res.ok) continue;
         const state = await res.json();
         try { onSnapshot?.(state); } catch { /* rendering must not end polling */ }
+        const next = `${state.status || ''}|${Array.isArray(state.logs) ? state.logs.length : 0}|${state.progress ?? ''}`;
+        if (next !== signature) {
+          signature = next;
+          lastActivity = Date.now();
+        }
         const status = String(state.status || '').toLowerCase();
         if (status === 'completed' || status === 'complete') return 'completed';
         if (status === 'failed' || status === 'cancelled' || status === 'error') return status;
+        if (Date.now() - lastActivity > STALL_MS) {
+          try { await cancelServerJob(id); } catch { /* best effort */ }
+          return 'stalled';
+        }
       } catch { /* transient poll failure: try again */ }
     }
     return 'timeout';
@@ -1423,7 +1489,7 @@ function App() {
   // renders the ordinary processing/results screen instead of a second UI, with
   // a slim progress bar above it. Between videos the previous job is cleared
   // and the log says the environment is being prepared for the next one.
-  const runBatchRows = async (items, options, indices) => {
+  const runBatchRows = async (items, options, indices, { autoRetry = false } = {}) => {
     const patch = (index, fields) => setBatch((current) => {
       if (!current) return current;
       const nextRows = current.rows.slice();
@@ -1434,6 +1500,7 @@ function App() {
       || (item.type === 'url' ? item.payload : item.type === 'collector' ? 'collector video' : 'video');
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     let cancelled = false;
+    const failed = new Set();
 
     for (const [position, i] of indices.entries()) {
       if (batchCancelRef.current) {
@@ -1477,8 +1544,8 @@ function App() {
       let lastStatus = '';
       try {
         const data = {
-          ...item,
           ...options,
+          ...item,
           acknowledged: options.acknowledged !== false,
         };
         const { headers, body } = buildProcessRequest(data);
@@ -1529,6 +1596,7 @@ function App() {
         });
         setQueueInfo(null);
         if (final === 'completed') {
+          failed.delete(i);
           patch(i, { state: 'done', finishedAt: Date.now() });
           setStatus('complete');
           // The clips are already on disk, where the gallery reads them.
@@ -1539,23 +1607,49 @@ function App() {
           cancelled = true;
           break;
         } else {
+          failed.add(i);
           // The server's own error line is the useful one; a bare "job failed"
           // made a provider error indistinguishable from a bad source file.
           const tail = [...lastLogs].reverse().find((line) => line && String(line).trim());
-          const error = tail ? String(tail).slice(0, 300)
-            : `job ${final}${lastStatus ? ` (${lastStatus})` : ''}`;
+          const error = final === 'stalled'
+            ? `No progress for ${Math.round(STALL_MS / 60000)} minutes; stopped and skipped.`
+            : (tail ? String(tail).slice(0, 300)
+              : `job ${final}${lastStatus ? ` (${lastStatus})` : ''}`);
           patch(i, { state: 'failed', finishedAt: Date.now(), error });
           setStatus('error');
           setJobError(error);
           await sleep(1200);
         }
       } catch (e) {
+        failed.add(i);
         const error = String(e.message || e).slice(0, 300);
         patch(i, { state: 'failed', finishedAt: Date.now(), error });
         setStatus('error');
         setJobError(error);
         await sleep(1200);
       }
+    }
+
+    // One last automatic pass over the failures, then move on. A job that
+    // failed for a transient reason (provider blip, download hiccup) usually
+    // works on a clean retry; a source that is genuinely broken is ignored
+    // after this so an overnight queue still finishes.
+    if (autoRetry && !cancelled && !batchCancelRef.current && failed.size) {
+      const retryIndices = [...failed].sort((a, b) => a - b);
+      setBatch((current) => (current ? { ...current, retrying: retryIndices.length } : current));
+      setLogs((prev) => [
+        ...prev,
+        `↻ Retrying ${retryIndices.length} failed video(s) once, then skipping any that fail again.`,
+      ]);
+      for (const i of retryIndices) {
+        patch(i, {
+          state: 'waiting', error: '', jobId: null,
+          logs: [], logTimes: [], startedAt: null, finishedAt: null, progress: null,
+        });
+      }
+      await sleep(1500);
+      await runBatchRows(items, options, retryIndices, { autoRetry: false });
+      setBatch((current) => (current ? { ...current, retrying: 0 } : current));
     }
 
     if (cancelled || batchCancelRef.current) {
@@ -1597,6 +1691,7 @@ function App() {
     const batchOptions = { outputFormat, acknowledged, ...options };
 
     batchCancelRef.current = false;
+    setBatchDetails(false);
     setBatch({
       rows, running: true, startedAt: Date.now(),
       items: list, options: batchOptions,
@@ -2069,6 +2164,16 @@ function App() {
         )}
 
         {/* The restored job is no longer on the server (purged or not yours). */}
+        {mediaOffline && (
+          <div role="alert" className="mx-3 sm:mx-6 mt-3 px-3.5 sm:px-4 py-2.5 bg-paper2 border border-[color:var(--color-danger)] rounded-card flex items-start gap-2 text-sm shrink-0 animate-fade">
+            <AlertTriangle size={16} className="text-danger shrink-0 mt-0.5" />
+            <span className="text-ink2">
+              <strong className="text-ink">Media drive not connected.</strong>{' '}
+              Renders, uploads and the clip library live on the external drive. Plug it
+              back in — nothing was deleted, and this banner clears by itself.
+            </span>
+          </div>
+        )}
         {jobGone && (
           <div role="status" className="mx-3 sm:mx-6 mt-2 px-3.5 sm:px-4 py-3 bg-paper2 border border-rule rounded-card flex items-start justify-between gap-3 animate-fade shrink-0">
             <div className="flex items-start sm:items-center gap-2 text-sm text-ink2 flex-wrap min-w-0">
@@ -2099,31 +2204,69 @@ function App() {
         {/* Queue progress: a slim line above the ordinary single-video screen.
             The queue uses the same processing/results view as a manual run. */}
         {activeTab === 'dashboard' && batch && (
-          <div className="mx-3 sm:mx-6 mt-3 px-3.5 sm:px-4 py-2.5 bg-paper2 border border-rule rounded-card flex flex-wrap items-center gap-2 sm:gap-3 shrink-0 animate-fade">
-            <span className="readout shrink-0">queue</span>
-            <span className="text-sm text-ink2 min-w-0 flex-1 truncate">
-              {queueDone}/{batch.rows.length} done
-              {queueCurrent ? ` · ${queueCurrent.label}`
-                : batch.running ? ' · preparing next video…' : ' · finished'}
-            </span>
-            {batch.running ? (
-              <button onClick={stopBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
-                stop queue
-              </button>
-            ) : (
-              <>
-                {queueFailed > 0 && (
-                  <button onClick={retryFailedBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
-                    retry failed ({queueFailed})
-                  </button>
-                )}
+          <div className="mx-3 sm:mx-6 mt-3 px-3.5 sm:px-4 py-2.5 bg-paper2 border border-rule rounded-card flex flex-col gap-2 shrink-0 animate-fade">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <span className="readout shrink-0">queue</span>
+              <span className="text-sm text-ink2 min-w-0 flex-1 truncate">
+                {queueDone}/{batch.rows.length} done
+                {queueCurrent ? ` · ${queueCurrent.label}`
+                  : batch.retrying ? ` · retrying ${batch.retrying} failed video(s)`
+                    : batch.running ? ' · preparing next video…' : ' · finished'}
+                {!batch.running && queueFailed > 0 ? ` · ${queueFailed} failed` : ''}
+              </span>
+              {batch.rows.some((r) => r.state === 'failed') || queueFailed > 0 ? (
                 <button
-                  onClick={() => { setBatch(null); setStatus('idle'); }}
+                  onClick={() => setBatchDetails((open) => !open)}
                   className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+                  aria-expanded={batchDetails}
                 >
-                  dismiss
+                  {batchDetails ? 'hide details' : 'details'}
                 </button>
-              </>
+              ) : null}
+              {batch.running ? (
+                <button onClick={stopBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
+                  stop queue
+                </button>
+              ) : (
+                <>
+                  {queueFailed > 0 && (
+                    <button onClick={retryFailedBatch} className="btn-quiet px-3 py-1.5 text-xs shrink-0">
+                      retry failed again ({queueFailed})
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setBatch(null); setBatchDetails(false); setStatus('idle'); }}
+                    className="btn-quiet px-3 py-1.5 text-xs shrink-0"
+                  >
+                    dismiss
+                  </button>
+                </>
+              )}
+            </div>
+            {batchDetails && (
+              <div className="divide-y divide-rule border-t border-rule">
+                {batch.rows.map((row, index) => (
+                  <div key={row.key || index} className="flex items-start gap-2 py-1.5">
+                    <span className="readout w-6 shrink-0">{String(index + 1).padStart(2, '0')}</span>
+                    <span className={`text-[11px] shrink-0 w-16 ${
+                      row.state === 'done' ? 'text-ok'
+                        : row.state === 'failed' ? 'text-danger'
+                          : row.state === 'running' ? 'text-brass' : 'text-muted'
+                    }`}
+                    >
+                      {row.state}
+                    </span>
+                    <span className="text-xs min-w-0 flex-1">
+                      <span className="block truncate" title={row.label}>{row.label}</span>
+                      {row.error ? (
+                        <span className="block text-[11px] text-danger line-clamp-2" title={row.error}>
+                          {row.error}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}

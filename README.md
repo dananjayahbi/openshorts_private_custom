@@ -15,7 +15,7 @@ Docker.
 | Page | What it does |
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip, **unload vram** |
-| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; single video or a queue that loops the same screen; **streamed video** split with a marked streamer box; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
+| Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; a bulk queue that loops the same screen and retries failures once; **streamed video** split with its own marked box + prevention area per queued video; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
 | Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, bulk-archive the selection, staged one-platform archive buttons |
 | Archive | Permanent clip store with advanced filters; push videos to external storage vaults and play them back when the device is connected |
 | Collector | Shelf of links and files; download later, queue, process |
@@ -37,11 +37,15 @@ two blank lines, five hashtags), a clean YouTube title with no hashtags, a
 250-500 character YouTube description, and five comma-separated tags for
 YouTube's tag field.
 
-Everything lives under `Storage/` (videos, thumbnails, uploads, collector,
-downloads, archive) and is served by the API as a local CDN. `Storage/settings.json`
-holds the provider chain and prompt overrides; `Storage/style_profiles.json` the
-saved looks. Archived clips and their SQLite index live in `Storage/archive/`;
-external vaults are single preallocated `.osvault` files on the device you pick.
+Small state (settings, style profiles, gallery flags, Thumbnail Studio) stays
+under `Storage/`; the big media tree (videos, uploads, collector, downloads,
+archive) can live on another disk via `OPENSHORTS_MEDIA` — `start.bat` points it
+at `D:\OpenShorts\Storage`. Both are served by the API as a local CDN.
+`Storage/settings.json` holds the provider chain and prompt overrides;
+`Storage/style_profiles.json` the saved looks. Archived clips and their SQLite
+index live under `<media>/archive/`; external vaults are single preallocated
+`.osvault` files on the device you pick. Unplugging the media drive is safe: the
+dashboard says so, and replugging it restores everything without a restart.
 
 ## Run it
 

@@ -1,12 +1,17 @@
 # Streamer mode (split layout)
 
-Clip Generator → **streamed video** is a single-video option for clipping a
+Clip Generator → **streamed video** is the split layout for clipping a
 streamer's VOD or livestream. It turns each normal 9:16 clip into a two-part
-frame: the streamer's marked box on top, the viral clip on the bottom.
+frame: the streamer's marked box on top, the viral clip on the bottom. It works
+for a single video and for a whole bulk queue (one mark per row).
 
 ## Marking
 
-- The toggle is only offered for a single video; bulk/queue runs never show it.
+- Single and bulk mode both offer it. In bulk mode a queue panel lists every
+  row with its own `1. box` / `2. prevent` buttons; `copy previous` copies the
+  last row's boxes. Generate refuses a streamed batch until every row has a
+  streamer box, and each submitted job carries only its own rectangles (the
+  shared batch options carry none).
 - The user marks the streamer's box once, **before** the render, on the
   original source at its true resolution. The modal plays the source and lets
   the user draw, move and **resize** a box freely; its shape is whatever the

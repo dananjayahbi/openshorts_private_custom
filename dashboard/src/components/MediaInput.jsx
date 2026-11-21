@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link2, Upload, FileVideo, X, Info, Loader2, ChevronDown, Layers, ListPlus, Film, Crosshair, EyeOff } from 'lucide-react';
 import { track } from '../lib/analytics';
 import { apiFetch } from '../lib/api';
@@ -98,7 +98,12 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     // The prevention area: the streamer's whole cam/overlay, which the clip's
     // half must never show. Independent of the crop shown on top.
     const [streamerAvoid, setStreamerAvoid] = useState(null);
-    // {src, title, objectUrl?} while the marker modal is open.
+    // Bulk + streamed: one mark per queued video. Keyed by the row identity
+    // (file key / link / collector id) so reordering or adding files cannot
+    // apply one video's boxes to another. {rect, avoid, preparedId}.
+    const [marks, setMarks] = useState({});
+    // {src, title, objectUrl?, focus, key?} while the marker modal is open.
+    // ``key`` is the bulk row being marked; absent means the single video.
     const [marker, setMarker] = useState(null);
     const [markerBusy, setMarkerBusy] = useState('');
     const [markerError, setMarkerError] = useState('');
@@ -114,6 +119,23 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
     const fileSeconds = singleFile ? durations[fileKey(singleFile)] ?? null : null;
     const fileTooShort = fileSeconds != null && fileSeconds < MIN_SOURCE_SECONDS;
     const bulkUrls = urlsText.split('\n').map((s) => s.trim()).filter(Boolean);
+    // The rows of the bulk + streamed queue: the exact source behind each row
+    // so the marker can open it, and the key its two boxes are stored under.
+    const bulkQueue = useMemo(() => {
+        if (mode === 'url') {
+            return urlsText.split('\n')
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map((u) => ({ key: `url:${u}`, label: u, kind: 'url', url: u }));
+        }
+        if (mode === 'file') {
+            return files.map((f) => ({ key: fileKey(f), label: f.name, kind: 'file', file: f }));
+        }
+        return picked.map((item) => ({
+            key: `collector:${item.id}`, label: item.title, kind: 'collector', item,
+        }));
+    }, [mode, urlsText, files, picked]);
+    const bulkUnmarked = bulkQueue.filter((entry) => !marks[entry.key]?.rect);
     const shortFiles = bulk
         ? files.filter((f) => durations[fileKey(f)] != null && durations[fileKey(f)] < MIN_SOURCE_SECONDS)
         : [];
@@ -179,6 +201,22 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         setStreamerAvoid(null);
         setPrepared(null);
     }, [mode, url, singleFile, pickedId]);
+
+    // A bulk row that is removed takes its marks with it: leaving them behind
+    // could apply this video's boxes to a different video added later under
+    // the same key (only possible for a re-picked file, but cheap to prevent).
+    useEffect(() => {
+        const alive = new Set(bulkQueue.map((entry) => entry.key));
+        setMarks((prev) => {
+            const next = {};
+            let changed = false;
+            for (const [key, value] of Object.entries(prev)) {
+                if (alive.has(key)) next[key] = value;
+                else changed = true;
+            }
+            return changed ? next : prev;
+        });
+    }, [bulkQueue]);
 
     // A Collector card's "Process" opens this page with its video already
     // selected. Applied once per handover (the same item can be handed over
@@ -340,6 +378,36 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
         setMarkerError('');
     };
 
+    // Bulk + streamed: open the marker for ONE row of the queue. A link is
+    // downloaded to the Collector once and that id is remembered, so the job
+    // processes the local copy instead of fetching the same link again.
+    const openMarkerFor = async (entry, focus = 'streamer') => {
+        setMarkerError('');
+        setMarkerBusy('');
+        try {
+            if (entry.kind === 'file') {
+                const objectUrl = URL.createObjectURL(entry.file);
+                setMarker({ src: objectUrl, title: entry.label, objectUrl, focus, key: entry.key });
+            } else if (entry.kind === 'collector') {
+                const item = await prepareCollectorItem(entry.item);
+                setMarker({ src: getApiUrl(item.video), title: item.title, focus, key: entry.key });
+            } else {
+                setMarkerBusy('Reading the link...');
+                const item = await prepareUrlSource(entry.url);
+                const preparedId = item.collector_id || item.id;
+                setMarks((prev) => ({
+                    ...prev,
+                    [entry.key]: { ...(prev[entry.key] || {}), preparedId },
+                }));
+                setMarker({ src: getApiUrl(item.video), title: item.title, focus, key: entry.key });
+            }
+        } catch (e) {
+            setMarkerError(String(e.message || e).slice(0, 260));
+        } finally {
+            setMarkerBusy('');
+        }
+    };
+
     const toggleStreamed = (on) => {
         setStreamed(on);
         if (on) {
@@ -381,7 +449,6 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     const setBulkMode = (next) => {
         setBulk(next);
-        if (next) setStreamed(false);
         if (!next) {
             setFiles((prev) => prev.slice(0, 1));
             setPicked((prev) => prev.slice(0, 1));
@@ -390,24 +457,44 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (streamed && !streamerRect) {
+        if (!bulk && streamed && !streamerRect) {
             setMarkerError('Mark the streamer box before starting the render.');
+            return;
+        }
+        if (bulk && streamed && bulkUnmarked.length) {
+            setMarkerError(
+                `${bulkUnmarked.length} video(s) still need a streamer box: `
+                + bulkUnmarked.slice(0, 3).map((entry) => entry.label).join(', ')
+                + (bulkUnmarked.length > 3 ? '…' : ''),
+            );
             return;
         }
         rememberOptions();
         const options = advanced();
 
         if (bulk) {
-            let items = [];
-            if (mode === 'url') {
-                items = bulkUrls.map((u) => ({ type: 'url', payload: u, label: u }));
-            } else if (mode === 'file') {
-                items = files.map((f) => ({ type: 'file', payload: f, label: f.name }));
-            } else {
-                items = picked.map((i) => ({ type: 'collector', payload: i.id, label: i.title }));
-            }
-            if (!items.length) return;
-            onProcessBatch?.({ items, outputFormat, acknowledged: true, ...options });
+            if (!bulkQueue.length) return;
+            // Each item carries ITS OWN boxes; the batch options' streamer is
+            // cleared so one video's crop can never leak onto the next.
+            const items = bulkQueue.map((entry) => {
+                const mark = marks[entry.key] || {};
+                const base = entry.kind === 'file'
+                    ? { type: 'file', payload: entry.file, label: entry.label }
+                    : entry.kind === 'collector'
+                        ? { type: 'collector', payload: entry.item.id, label: entry.label }
+                        : (mark.preparedId
+                            ? { type: 'collector', payload: mark.preparedId, label: entry.label }
+                            : { type: 'url', payload: entry.url, label: entry.label });
+                return {
+                    ...base,
+                    streamer: streamed ? (mark.rect || null) : null,
+                    streamerAvoid: streamed ? (mark.avoid || null) : null,
+                };
+            });
+            onProcessBatch?.({
+                items, outputFormat, acknowledged: true, ...options,
+                streamer: null, streamerAvoid: null,
+            });
             return;
         }
 
@@ -495,69 +582,146 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                 </label>
             </div>
 
-            {!bulk && (
-                <div className="mb-4 rounded-card border border-rule bg-paper2/60 p-3">
-                    <label className="flex items-start gap-2 cursor-pointer select-none">
-                        <input
-                            type="checkbox"
-                            checked={streamed}
-                            onChange={(e) => toggleStreamed(e.target.checked)}
-                            className="mt-0.5 w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
-                        />
-                        <span>
-                            <span className="text-sm text-ink">streamed video</span>
-                            <span className="block text-[11px] text-muted leading-snug">
-                                Splits the 9:16 output: the streamer&apos;s marked box on top, the
-                                viral clip on the bottom. Resize the box to its real shape — a 16:9
-                                cam leaves most of the frame to the clip. Then mark the <em>separate</em>{' '}
-                                prevent area — the streamer&apos;s whole cam/overlay — so the clip&apos;s
-                                half is framed around it and never shows it. The AI also gets told this
-                                is a stream.
-                            </span>
+            <div className="mb-4 rounded-card border border-rule bg-paper2/60 p-3">
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                    <input
+                        type="checkbox"
+                        checked={streamed}
+                        onChange={(e) => toggleStreamed(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 accent-[var(--color-accent)] cursor-pointer"
+                    />
+                    <span>
+                        <span className="text-sm text-ink">streamed video</span>
+                        <span className="block text-[11px] text-muted leading-snug">
+                            Splits the 9:16 output: the streamer&apos;s marked box on top, the
+                            viral clip on the bottom. Resize the box to its real shape — a 16:9
+                            cam leaves most of the frame to the clip. Then mark the <em>separate</em>{' '}
+                            prevent area — the streamer&apos;s whole cam/overlay — so the clip&apos;s
+                            half is framed around it and never shows it.
+                            {bulk
+                                ? ' In bulk mode you mark each queued video below; every job then carries its own two boxes.'
+                                : ' The AI also gets told this is a stream.'}
                         </span>
-                    </label>
-                    {streamed && (
-                        <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-6">
-                            <button
-                                type="button"
-                                onClick={() => openMarker('streamer')}
-                                disabled={!!markerBusy}
-                                title="The crop shown in the top half; its shape sets the split"
-                                className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerRect ? '' : 'text-brass'}`}
-                            >
-                                {markerBusy ? <Loader2 size={13} className="animate-spin" /> : <Crosshair size={13} />}
-                                1. {streamerRect ? 'edit streamer box' : 'mark streamer box'}
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => openMarker('avoid')}
-                                disabled={!!markerBusy || !streamerRect}
-                                title={streamerRect ? 'Separate box: the streamer area the clip must never show' : 'Mark the streamer box first'}
-                                className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerAvoid ? '' : 'text-danger'}`}
-                            >
-                                <EyeOff size={13} />
-                                2. {streamerAvoid ? 'edit prevent area' : 'mark prevent area'}
-                            </button>
-                            {streamerRect ? (
-                                <span className="readout text-[11px] text-ok">
-                                    streamer box saved ({Math.round(streamerRect.w * 100)}x{Math.round(streamerRect.h * 100)}%)
-                                    {streamerAvoid
-                                        ? ' · prevent area set · clip framed around it'
-                                        : ' · prevent area not marked — the cam may still show in the clip'}
-                                </span>
-                            ) : (
-                                <span className="readout text-[11px] text-muted">
-                                    mark the box, then start the render
-                                </span>
-                            )}
-                            {markerBusy && <span className="readout text-[11px]">{markerBusy}</span>}
-                            {markerError && (
-                                <span className="text-[11px] text-danger" role="alert">{markerError}</span>
-                            )}
-                        </div>
-                    )}
-                </div>
-            )}
+                    </span>
+                </label>
+
+                {streamed && !bulk && (
+                    <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-6">
+                        <button
+                            type="button"
+                            onClick={() => openMarker('streamer')}
+                            disabled={!!markerBusy}
+                            title="The crop shown in the top half; its shape sets the split"
+                            className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerRect ? '' : 'text-brass'}`}
+                        >
+                            {markerBusy ? <Loader2 size={13} className="animate-spin" /> : <Crosshair size={13} />}
+                            1. {streamerRect ? 'edit streamer box' : 'mark streamer box'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => openMarker('avoid')}
+                            disabled={!!markerBusy || !streamerRect}
+                            title={streamerRect ? 'Separate box: the streamer area the clip must never show' : 'Mark the streamer box first'}
+                            className={`btn-quiet text-xs py-1.5 px-2.5 ${streamerAvoid ? '' : 'text-danger'}`}
+                        >
+                            <EyeOff size={13} />
+                            2. {streamerAvoid ? 'edit prevent area' : 'mark prevent area'}
+                        </button>
+                        {streamerRect ? (
+                            <span className="readout text-[11px] text-ok">
+                                streamer box saved ({Math.round(streamerRect.w * 100)}x{Math.round(streamerRect.h * 100)}%)
+                                {streamerAvoid
+                                    ? ' · prevent area set · clip framed around it'
+                                    : ' · prevent area not marked — the cam may still show in the clip'}
+                            </span>
+                        ) : (
+                            <span className="readout text-[11px] text-muted">
+                                mark the box, then start the render
+                            </span>
+                        )}
+                        {markerBusy && <span className="readout text-[11px]">{markerBusy}</span>}
+                        {markerError && (
+                            <span className="text-[11px] text-danger" role="alert">{markerError}</span>
+                        )}
+                    </div>
+                )}
+
+                {streamed && bulk && (
+                    <div className="mt-3 space-y-2">
+                        <p className="readout normal-case text-[11px] text-muted">
+                            mark each video · {bulkQueue.length - bulkUnmarked.length}/{bulkQueue.length} ready
+                            {bulkQueue.length > 0 && bulkUnmarked.length === 0
+                                ? ' · every job carries its own boxes'
+                                : ''}
+                        </p>
+                        {bulkQueue.length === 0 ? (
+                            <p className="text-[11px] text-muted">
+                                Add the videos below first; each one appears here to be marked.
+                            </p>
+                        ) : bulkQueue.map((entry, i) => {
+                            const mark = marks[entry.key] || {};
+                            const previous = i > 0 ? marks[bulkQueue[i - 1].key] : null;
+                            return (
+                                <div
+                                    key={entry.key}
+                                    className="flex flex-wrap items-center gap-2 rounded-input border border-rule bg-paper px-2.5 py-2"
+                                >
+                                    <span className="readout w-6 shrink-0">{String(i + 1).padStart(2, '0')}</span>
+                                    <span className="text-xs truncate flex-1 min-w-0" title={entry.label}>
+                                        {entry.label}
+                                    </span>
+                                    <span className={`text-[10px] shrink-0 ${mark.rect ? 'text-ok' : 'text-brass'}`}>
+                                        {mark.rect
+                                            ? `box ${Math.round(mark.rect.w * 100)}x${Math.round(mark.rect.h * 100)}%`
+                                            : 'box missing'}
+                                        {mark.rect
+                                            ? (mark.avoid ? ' · prevent set' : ' · prevent not set')
+                                            : ''}
+                                        {mark.preparedId ? ' · source saved' : ''}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => openMarkerFor(entry, 'streamer')}
+                                        disabled={!!markerBusy}
+                                        className={`btn-quiet text-[11px] py-1 px-2 ${mark.rect ? '' : 'text-brass'}`}
+                                    >
+                                        1. box
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => openMarkerFor(entry, 'avoid')}
+                                        disabled={!!markerBusy || !mark.rect}
+                                        className={`btn-quiet text-[11px] py-1 px-2 ${mark.avoid ? '' : 'text-danger'}`}
+                                    >
+                                        2. prevent
+                                    </button>
+                                    {previous?.rect && (!mark.rect || !mark.avoid) && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setMarks((prev) => ({
+                                                ...prev,
+                                                [entry.key]: {
+                                                    ...(prev[entry.key] || {}),
+                                                    rect: previous.rect,
+                                                    avoid: previous.avoid,
+                                                },
+                                            }))}
+                                            className="btn-quiet text-[10px] py-1 px-2"
+                                            title="Use the previous video's boxes on this one"
+                                        >
+                                            copy previous
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                        {markerBusy && <p className="readout text-[11px]">{markerBusy}</p>}
+                        {markerError && (
+                            <p className="text-[11px] text-danger" role="alert">{markerError}</p>
+                        )}
+                    </div>
+                )}
+            </div>
 
             <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule overflow-x-auto" data-tutorial="source-tabs">
                 <button
@@ -1005,12 +1169,23 @@ export default function MediaInput({ onProcess, onProcessBatch, isProcessing, in
                 open={!!marker}
                 src={marker?.src}
                 title={marker?.title}
-                initialRect={streamerRect}
-                initialAvoid={streamerAvoid}
+                initialRect={marker?.key
+                    ? (marks[marker.key]?.rect || null)
+                    : streamerRect}
+                initialAvoid={marker?.key
+                    ? (marks[marker.key]?.avoid || null)
+                    : streamerAvoid}
                 initialMode={marker?.focus}
                 onSave={(rect, avoid) => {
-                    setStreamerRect(rect);
-                    setStreamerAvoid(avoid);
+                    if (marker?.key) {
+                        setMarks((prev) => ({
+                            ...prev,
+                            [marker.key]: { ...(prev[marker.key] || {}), rect, avoid },
+                        }));
+                    } else {
+                        setStreamerRect(rect);
+                        setStreamerAvoid(avoid);
+                    }
                     closeMarker();
                 }}
                 onClose={closeMarker}

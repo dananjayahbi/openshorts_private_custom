@@ -20,12 +20,21 @@ Set-Location $root
 $python = Join-Path $Venv 'Scripts\python.exe'
 $cache = if ($env:PIP_CACHE_DIR) { $env:PIP_CACHE_DIR } else { 'F:\pip-cache' }
 
-# The local CDN: one tree for every clip, thumbnail and upload (storage.py).
-$storageRoot = if ($env:OPENSHORTS_STORAGE) { $env:OPENSHORTS_STORAGE } else { Join-Path $root 'Storage' }
-foreach ($sub in @('videos', 'thumbnails', 'uploads')) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $storageRoot $sub) | Out-Null
+# Two roots (storage.py): small state next to the app, big media on the media
+# drive. A missing drive is only a warning: the API starts and the dashboard
+# shows a banner; the tree is recreated when the drive is plugged back in.
+$stateRoot = if ($env:OPENSHORTS_STORAGE) { $env:OPENSHORTS_STORAGE } else { Join-Path $root 'Storage' }
+$mediaRoot = if ($env:OPENSHORTS_MEDIA) { $env:OPENSHORTS_MEDIA } else { 'D:\OpenShorts\Storage' }
+New-Item -ItemType Directory -Force -Path (Join-Path $stateRoot 'thumbnails') | Out-Null
+if (Test-Path ([System.IO.Path]::GetPathRoot($mediaRoot))) {
+    foreach ($sub in @('videos', 'uploads', 'downloads', 'collector', 'archive')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $mediaRoot $sub) | Out-Null
+    }
+} else {
+    Write-Host "media drive not connected: $mediaRoot (will be created when plugged in)" -ForegroundColor Yellow
 }
-Write-Host "media root: $storageRoot" -ForegroundColor DarkGray
+Write-Host "state root: $stateRoot" -ForegroundColor DarkGray
+Write-Host "media root: $mediaRoot" -ForegroundColor DarkGray
 
 Write-Host "== 1/6 python venv ($Venv)" -ForegroundColor Cyan
 if (-not (Test-Path $python)) {

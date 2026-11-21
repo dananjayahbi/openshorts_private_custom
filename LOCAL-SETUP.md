@@ -37,38 +37,62 @@ The venv lives **outside the repo** (`F:\openshorts-venv`, override with
 `OPENSHORTS_VENV`) so the repo drive keeps its free space for rendered clips.
 The pip cache is `F:\pip-cache`. Both are deliberately off the E: volume.
 
-## Storage — the local CDN
+## Storage — two roots, and nothing is deleted for you
 
-Every video, thumbnail and upload lives under one tree at the repo root
-(`storage.py`), so the library can be inspected, backed up or moved as a unit:
+The tree is split in two (`storage.py`):
 
 ```
-Storage/
-  videos/<job_id>/...        clips, sources, metadata   -> /videos/<job_id>/...
-  thumbnails/<session_id>/...                           -> /thumbnails/...
+Storage/                     small state, always next to the app
+  settings.json, style_profiles.json, clip_state.json
+  thumbnails/<session_id>/...                        -> /thumbnails/...
+
+<media>/                     large media (start.bat: D:\OpenShorts\Storage)
+  videos/<job_id>/...        clips, sources, metadata -> /videos/<job_id>/...
   uploads/                   transient sources (not served)
   downloads/<id>/...         Download Manager sources (not served)
-  archive/                   permanent clips + archive.db (not served, not swept)
+  collector/                 the Collector shelf           -> /collector/...
+  archive/                   permanent clips + archive.db (not served)
 ```
 
-- `OUTPUT_DIR` is `Storage/videos`, `UPLOAD_DIR` is `Storage/uploads`,
-  `THUMBNAILS_DIR` is `Storage/thumbnails`. The names survive on purpose: every
-  `os.path.join(OUTPUT_DIR, job_id, ...)` in the pipeline keeps working, the URL
-  mounts (`/videos`, `/thumbnails`) are unchanged, and the retention sweeps
-  (`OUTPUT_MAX_GB`, `UPLOADS_MAX_GB`) now measure the new tree.
-- The dashboard home page reports the size of the whole `Storage/` tree and the
-  free space on its volume.
-- **Move it to another disk** by setting `OPENSHORTS_STORAGE` to an absolute
-  path before starting (both launchers create `videos/`, `thumbnails/`,
-  `uploads/`):
-  ```powershell
-  $env:OPENSHORTS_STORAGE = 'F:\OpenShorts-Storage'
-  .\start.bat
-  ```
-  Set it in the same shell for `start-native.ps1`; it passes the absolute
-  `Storage\videos` to the renderer automatically.
-- The folder is git-ignored. The old `output/` and `uploads/` trees were
+- `OPENSHORTS_STORAGE` moves the small state root. `OPENSHORTS_MEDIA` moves the
+  media root; when it is unset both are the same `Storage/` tree, which keeps an
+  old install and the test suite working unchanged. `start.bat` sets the media
+  root to `D:\OpenShorts\Storage`.
+- **The external drive may be unplugged.** The API still starts, the dashboard
+  shows a "media drive not connected" banner, and the media tree is recreated
+  when the drive is plugged back in (the background loop calls
+  `storage.ensure_media()`). Nothing is lost: every path is derived from the
+  root, and the small state never leaves the app drive.
+- `OUTPUT_DIR` is `<media>/videos`, `UPLOAD_DIR` is `<media>/uploads`, and
+  `THUMBNAILS_DIR` is `Storage/thumbnails`. Every `os.path.join(OUTPUT_DIR,
+  job_id, ...)` in the pipeline keeps working and the URL mounts are unchanged.
+- **No automatic deletions.** `OUTPUT_MAX_GB=0` and `UPLOADS_MAX_GB=0` disable
+  the size caps, and `JOB_RETENTION_SECONDS=0` / `SOURCE_RETENTION_SECONDS=0`
+  mean "keep forever". The old defaults (24 h + a 10 GB output cap measured on
+  `videos/` only) are what silently removed finished renders. Set a positive
+  number only if you actually want the sweeps. Deleting a clip from the gallery
+  is still a manual action.
+- The dashboard home page reports the app's footprint across both roots and the
+  free space on the media volume.
+- The folders are git-ignored. The old `output/` and `uploads/` trees were
   removed when this layout landed.
+
+## Overnight queue (bulk + streamed)
+
+Turn on **bulk mode**, add the videos (files, links, or Collector items), then
+turn on **streamed video**. The generator shows one row per video with its own
+`1. box` / `2. prevent` buttons: each row stores its own streamer crop and
+prevention area, so a batch of 20 streamers is marked once and then left alone.
+`copy previous` reuses the last row's boxes when the cam layout is the same.
+
+Pressing generate submits one normal job per row, one at a time. A failure is
+recorded on its row (with the server's error line) and the next video loads; a
+job that reports no progress for 45 minutes is cancelled and skipped. At the
+end, the failed rows are retried once automatically, then ignored. The queue
+banner shows the count, opens a per-row detail list when anything failed, and
+holds a screen wake lock while it runs, so you can start it and go to sleep.
+
+Details: `docs/architecture/streamer-mode.md`.
 
 ## Collector — find now, process later
 
@@ -143,12 +167,18 @@ Deleting is refused while an item is queued, downloading or splitting.
 
 ## Streamed videos: the streamer split
 
-On the Clip Generator, a single video can be toggled **streamed video** (bulk /
-queue runs do not offer it). A button opens a modal that plays the original
-source at its true aspect ratio; drag a box over the streamer's webcam/section.
-The box can be moved and resized freely — its shape sets the split (a 16:9 cam
-takes about a third of the frame, 9:8 the even 50/50) — and is saved as
-fractions of the source frame.
+On the Clip Generator, **streamed video** can be enabled for one video or for a
+whole bulk queue. A button opens a modal that plays the original source at its
+true aspect ratio; drag a box over the streamer's webcam/section. The box can be
+moved and resized freely — its shape sets the split (a 16:9 cam takes about a
+third of the frame, 9:8 the even 50/50) — and is saved as fractions of the
+source frame.
+
+- **Bulk + streamed:** each queued row has its own `1. box` / `2. prevent`
+  buttons, so one row's crop can never be applied to another video. `copy
+  previous` reuses the last row's boxes. Generate accepts the batch only when
+  every row has at least a streamer box; each job then carries its own two
+  rectangles.
 
 - A local upload plays straight from the browser. A Collector item plays its
   downloaded copy. A link is downloaded into the Collector first and then
@@ -731,8 +761,10 @@ project). Container ports stay 8000/5173/3100.
 | `FFMPEG_ENCODER` | `auto` | probes `h264_nvenc`, falls back to x264 only if unusable |
 | `MAX_CONCURRENT_JOBS` | `1` | one job at a time on a 6 GB card |
 | `GPU_MIN_FREE_MB` | `2500` | the default 4500 would stall every job on 6 GB |
-| `JOB_RETENTION_SECONDS` | `2592000` | 30 days, so the Clip Gallery keeps its clips |
-| `OUTPUT_MAX_GB` / `UPLOADS_MAX_GB` | `10` / `8` | hard disk safety net |
+| `OPENSHORTS_STORAGE` | `Storage` | small state root: settings, profiles, gallery flags, Thumbnail Studio |
+| `OPENSHORTS_MEDIA` | `D:\OpenShorts\Storage` (set by `start.bat`) | big media root: renders, sources, Collector, archive; safe to unplug |
+| `JOB_RETENTION_SECONDS` | `0` | keep every finished render; 0 = never age out |
+| `OUTPUT_MAX_GB` / `UPLOADS_MAX_GB` | `0` / `0` | no size cap; a positive value trims oldest-first |
 | `GEMINI_API_KEY` | your free key | server-side fallback; Settings in the UI still wins |
 
 VRAM management is the pipeline's own: `transcribe_video()` unloads whisper in a
@@ -805,11 +837,13 @@ each job's `*_metadata.json` and returns the clips that really rendered:
   `q`) and paging (`limit`, `page`, legacy `offset`) all run before the page is
   cut; the response adds `total`, `page`, `pages` and `has_more`.
 
-Clips live in `Storage/videos/<job_id>/` for `JOB_RETENTION_SECONDS` (30 days
-in the local `.env`) and are trimmed oldest-first once `OUTPUT_MAX_GB` is
-reached. Archive a clip to keep it permanently in `Storage/archive/` (never
-swept). To keep the whole tree on another disk, set `OPENSHORTS_STORAGE` (see
-**Storage** above) instead of moving the working directory.
+Clips live in `<media>/videos/<job_id>/` and are never removed automatically:
+`JOB_RETENTION_SECONDS=0` and `OUTPUT_MAX_GB=0` / `UPLOADS_MAX_GB=0` in the local
+`.env` mean "keep forever". A positive value re-enables the old age- or
+size-based sweeps, oldest first. Archive a clip to move it into
+`<media>/archive/` (also never swept). The media root is set with
+`OPENSHORTS_MEDIA` (see **Storage** above) instead of moving the working
+directory.
 
 ## GPU driver (resolved)
 

@@ -25,7 +25,7 @@ import uuid
 import storage
 from jsonfile import write_json_atomic
 
-COLLECTOR_DIR = os.path.join(storage.STORAGE_DIR, "collector")
+COLLECTOR_DIR = storage.COLLECTOR_DIR
 FILES_DIR = os.path.join(COLLECTOR_DIR, "files")
 THUMBS_DIR = os.path.join(COLLECTOR_DIR, "thumbs")
 INDEX_FILE = os.path.join(COLLECTOR_DIR, "items.json")
@@ -39,10 +39,15 @@ _downloading = set()
 
 
 def ensure():
-    for path in (COLLECTOR_DIR, FILES_DIR, THUMBS_DIR):
-        os.makedirs(path, exist_ok=True)
-    if not os.path.exists(INDEX_FILE):
-        write_json_atomic(INDEX_FILE, [])
+    """Create the shelf. A missing media drive is reported, never raised."""
+    try:
+        for path in (COLLECTOR_DIR, FILES_DIR, THUMBS_DIR):
+            os.makedirs(path, exist_ok=True)
+        if not os.path.exists(INDEX_FILE):
+            write_json_atomic(INDEX_FILE, [])
+    except OSError:
+        return False
+    return True
 
 
 def valid_id(item_id) -> bool:

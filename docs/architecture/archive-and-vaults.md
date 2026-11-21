@@ -8,19 +8,19 @@ the failure rules. The user-facing summary is in `LOCAL-SETUP.md`; the page is
 
 ## Why a separate store
 
-`Storage/videos/<job_id>/` is a render workspace. It is swept after
-`JOB_RETENTION_SECONDS`, trimmed by `OUTPUT_MAX_GB`, and its contents are
-allowed to change while a job runs. Keeping an archival copy there would mean a
-file could disappear long after the user pressed "archive".
+`<media>/videos/<job_id>/` is a render workspace. In this build it is **not**
+swept (`JOB_RETENTION_SECONDS=0`, `OUTPUT_MAX_GB=0`); a hosted deploy can still
+re-enable the age or size sweep. Its contents are allowed to change while a job
+runs, so keeping an archival copy there would still be wrong.
 
 Archiving therefore **moves** the chosen video and its poster into
-`Storage/archive/files/<id>/` first, and only then records the clip. The sweep
-walks the sibling directories (`videos`, `thumbnails`, `uploads`, `downloads`)
-and never descends into `archive/`.
+`<media>/archive/files/<id>/` first, and only then records the clip. The sweep
+walks the sibling directories (`videos`, `uploads`, `downloads`) and never
+descends into `archive/`.
 
 ## Index
 
-`Storage/archive/archive.db` is a small SQLite database (Python's stdlib
+`<media>/archive/archive.db` is a small SQLite database (Python's stdlib
 `sqlite3`, WAL mode). The pipeline has no other local database, so this adds no
 dependency and stays next to the data it describes.
 
@@ -133,7 +133,7 @@ and leaves the vault entry intact.
 
 `return to gallery` (unarchive) works for a local **or** a connected vaulted
 clip. A vaulted clip is copied straight into its job folder, hashed, and only
-then is the vault entry freed; the archive row and `Storage/archive/files/<id>/`
+then is the vault entry freed; the archive row and `<media>/archive/files/<id>/`
 are removed last, so main storage and the archive never both own the video.
 
 ## Device discovery
@@ -180,7 +180,7 @@ the bytes are local or inside a vault. When the vault is disconnected the
 endpoint answers 409 with the vault name, and the page keeps showing the poster
 plus a "connect" prompt instead of a broken player.
 
-Posters are always served from `Storage/archive/files/<id>/`, so the grid looks
+Posters are always served from `<media>/archive/files/<id>/`, so the grid looks
 the same with every device unplugged.
 
 ## Failure rules
