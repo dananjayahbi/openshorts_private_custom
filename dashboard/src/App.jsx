@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers, FlaskConical, Palette, Archive as ArchiveIcon } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, Home, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, LayoutGrid, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Layers, FlaskConical, Palette, Archive as ArchiveIcon } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import SettingsPage from './components/SettingsPage';
 import Collector from './components/Collector';
 import DownloadManager from './components/DownloadManager';
 import Archive from './components/Archive';
-import McpConnectCard from './components/McpConnectCard';
+import Sorter from './components/Sorter';
+import ContentPlanner from './components/ContentPlanner';
 import ResultCard from './components/ResultCard';
 import HomeDashboard from './components/HomeDashboard';
 import Playground from './components/Playground';
@@ -1106,7 +1107,7 @@ function App() {
   useEffect(() => {
     // 'history' is the pre-redesign name of the Clip Gallery: emails already
     // sent still point at it, so it is accepted and mapped, not ignored.
-    const DEEP_LINK_TABS = ['history', 'home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'collector', 'downloads', 'ai-agent'];
+    const DEEP_LINK_TABS = ['history', 'home', 'settings', 'thumbnails', 'dashboard', 'gallery', 'sorter', 'planner', 'collector', 'downloads', 'ai-agent'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
@@ -1191,7 +1192,7 @@ function App() {
   // Included in the plan (fully managed, no keys): Clip Generator + YouTube Studio.
   // Advanced (bring your own fal.ai + ElevenLabs keys): AI Shorts + AI Agent.
   const INCLUDED_TOOL_TABS = ['dashboard', 'thumbnails'];
-  const ADVANCED_TOOL_TABS = ['saasshorts', 'ai-agent'];
+  const ADVANCED_TOOL_TABS = ['saasshorts'];
   const TOOL_NAMES = { dashboard: 'the Clip Generator', thumbnails: 'the YouTube Studio' };
   const gateThisTab = needsPlan && INCLUDED_TOOL_TABS.includes(activeTab);      // included tool, no plan yet
   const advancedThisTab = billingEnabled && ADVANCED_TOOL_TABS.includes(activeTab); // BYOK-notice tools
@@ -1881,14 +1882,15 @@ function App() {
     { id: 'home', ord: '00', icon: Home, label: 'Home', short: 'home', primary: true },
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
     { id: 'gallery', ord: '02', icon: LayoutGrid, label: 'Clip Gallery', short: 'library', primary: true },
-    { id: 'archive', ord: '03', icon: ArchiveIcon, label: 'Archive', short: 'archive' },
-    { id: 'collector', ord: '04', icon: Layers, label: 'Collector', short: 'shelf', primary: true },
-    { id: 'downloads', ord: '04', icon: Download, label: 'Download Manager', short: 'downloads' },
-    { id: 'playground', ord: '05', icon: FlaskConical, label: 'Playground', short: 'play' },
-    { id: 'profiles', ord: '06', icon: Palette, label: 'Style Profiles', short: 'styles' },
-    { id: 'ai-agent', ord: '07', icon: Bot, label: 'AI Agent', short: 'agent' },
-    { id: 'thumbnails', ord: '08', icon: Image, label: 'YouTube Studio', short: 'studio' },
-    { id: 'settings', ord: '09', icon: Settings, label: 'Settings', short: 'settings' },
+    { id: 'sorter', ord: '03', icon: CheckCircle2, label: 'Sorter', short: 'sorter', primary: true },
+    { id: 'planner', ord: '04', icon: Calendar, label: 'Content Planner', short: 'planner' },
+    { id: 'archive', ord: '05', icon: ArchiveIcon, label: 'Archive', short: 'archive' },
+    { id: 'collector', ord: '06', icon: Layers, label: 'Collector', short: 'shelf' },
+    { id: 'downloads', ord: '06', icon: Download, label: 'Download Manager', short: 'downloads' },
+    { id: 'playground', ord: '07', icon: FlaskConical, label: 'Playground', short: 'play' },
+    { id: 'profiles', ord: '08', icon: Palette, label: 'Style Profiles', short: 'styles' },
+    { id: 'thumbnails', ord: '09', icon: Image, label: 'YouTube Studio', short: 'studio' },
+    { id: 'settings', ord: '10', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -2292,83 +2294,32 @@ function App() {
             />
           )}
 
-          {/* View: AI Agent — the real control surface of this install: the
-              MCP server. The upstream page advertised a separate GitHub
-              "skill" and an autopilot this fork does not have. */}
-          {activeTab === 'ai-agent' && (
-            <div className="h-full overflow-y-auto overscroll-contain custom-scrollbar p-3 sm:p-6 animate-fade">
-              <div className="w-full space-y-6">
-
-                <div className="space-y-3">
-                  <p className="eyebrow flex items-center gap-2">
-                    <Bot size={12} /> 07 · AI AGENT
-                  </p>
-                  <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
-                    Your agent drives the pipeline
-                  </h1>
-                  <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
-                    Connect Claude, ChatGPT, Cursor or n8n to the built-in MCP server. An agent
-                    can add a video, choose the moments, render clips and recut them — the
-                    transcript flow needs no model key of its own.
-                  </p>
-                </div>
-
-                <div className="grid md:grid-cols-3 gap-4">
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <Upload size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">1. Bring a source</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      <code className="text-ink2">process_video</code> takes a YouTube link or a
-                      direct video URL; <code className="text-ink2">create_upload</code> accepts a
-                      local file. <code className="text-ink2">get_job_status</code> follows the job.
-                    </p>
-                  </div>
-
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <Users size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">2. Read the transcript</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      <code className="text-ink2">prepare_transcript</code> downloads and transcribes
-                      once; <code className="text-ink2">get_transcript</code> returns the timestamped
-                      words so the agent can pick moments itself.
-                    </p>
-                  </div>
-
-                  <div className="card p-5 space-y-2">
-                    <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
-                      <CheckCircle2 size={18} className="text-brass" />
-                    </div>
-                    <h3 className="font-medium text-ink lowercase">3. Render the cuts</h3>
-                    <p className="text-xs text-muted leading-relaxed">
-                      <code className="text-ink2">render_plan</code> renders the agent&apos;s chosen
-                      cuts from that same source; <code className="text-ink2">list_clips</code>,
-                      {' '}<code className="text-ink2">add_subtitles</code> and
-                      {' '}<code className="text-ink2">recut_clip</code> finish them.
-                    </p>
-                  </div>
-                </div>
-
-                <McpConnectCard cloud={false} />
-
-                <p className="text-xs text-muted leading-relaxed">
-                  Running locally, the MCP endpoint has no authentication: anything that can reach
-                  this machine can drive it. Keep it bound to localhost.
-                </p>
-
-              </div>
-            </div>
-          )}
-
           {/* View: Clip Gallery — every clip this instance has rendered.
               Gallery owns the scroller: wrapping it in another one double-scrolled
               and the infinite-scroll observer never saw its sentinel. */}
           {activeTab === 'gallery' && (
             <div className="h-full animate-fade">
-              <Gallery onOpenArchive={() => goToTab('archive')} />
+              <Gallery
+                onOpenArchive={() => goToTab('archive')}
+                onOpenSorter={() => goToTab('sorter')}
+              />
+            </div>
+          )}
+
+          {/* View: Sorter — one clip at a time, accept / stage / reject. */}
+          {activeTab === 'sorter' && (
+            <div className="h-full animate-fade">
+              <Sorter onOpenGallery={() => goToTab('gallery')} />
+            </div>
+          )}
+
+          {/* View: Content Planner — a month calendar of accepted clips. */}
+          {activeTab === 'planner' && (
+            <div className="h-full animate-fade">
+              <ContentPlanner
+                onOpenGallery={() => goToTab('gallery')}
+                onOpenSorter={() => goToTab('sorter')}
+              />
             </div>
           )}
 

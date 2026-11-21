@@ -43,7 +43,9 @@ The tree is split in two (`storage.py`):
 
 ```
 Storage/                     small state, always next to the app
-  settings.json, style_profiles.json, clip_state.json
+  settings.json, style_profiles.json
+  clip_state.json            review status + platform/used marks
+  content_plan.json          the Content Planner calendar
   thumbnails/<session_id>/...                        -> /thumbnails/...
 
 <media>/                     large media (start.bat: D:\OpenShorts\Storage)
@@ -353,6 +355,9 @@ page is cut, so the tab badges, the pager and the grid agree with each other:
   an error, so a stale link lands on the last page.
 - `view=active|archived|all` and `usage=any|used|unused` (the three active tabs;
   archived cards now live on the Archive page).
+- `status=any|accepted|staged|unreviewed` — the Sorter decision. The dashboard
+  sends `accepted` so the gallery opens on publishable clips; `any` is the API
+  default, keeping older callers and the whole library available.
 - `platform=any|youtube|facebook|both|none` — the independent per-platform
   marks, not just the combined used flag.
 - `date=any|today|yesterday|week|month|custom` with `date_from`/`date_to`
@@ -378,6 +383,36 @@ runs one. Stale keys for deleted jobs are pruned on the next scan.
 
 The modal player letterboxes the clip with `object-fit: contain` instead of
 cropping it, so a 16:9 or 1:1 render is shown in full.
+
+## Sorter: accept, stage or reject
+
+`/sorter` is the review queue for clips that have no decision yet. One clip
+plays at a time; **Accept** is the large left button, **Reject** the large right
+one, and **Stage for later** sits underneath them (the smaller, less dangerous
+choice). Reject opens the same in-app delete confirmation as the gallery and
+then removes every rendered file for that clip; there is no stored `rejected`
+state. Keyboard: `←` or `A` accepts, `→` or `R` rejects, `↓` or `S` stages.
+
+The decision lives in `clip_state.json` as `accepted` or `staged` (missing means
+`unreviewed`), so it survives a re-render and is shared by the gallery. The
+gallery's **review status** filter opens on `accepted`; choose `staging`,
+`unreviewed` or `all` to see the other piles. The clip modal can also change the
+status of a clip after the fact.
+
+## Content Planner: the publishing calendar
+
+`/content-planner` is a Sunday-to-Saturday month calendar. Each day holds
+icon-sized posters of the clips planned for it; click one to open the same
+full-viewport clip modal as the gallery (play it, mark it posted, change its
+status). The **add** button on a day opens a picker over the gallery — accepted
+clips by default, staging/all on request, with search — and adds the chosen
+clip to that day. A clip may appear on multiple days but not twice on one day.
+
+The green ring around a planned thumbnail means the clip is already marked used
+on a platform; its `fb` / `yt` marks are the same per-platform flags the gallery
+and the clip modal edit. The plan itself is `content_plan.json` in the small
+state tree (next to settings), so unplugging the media drive keeps the calendar;
+the clip metadata and posters come back when the drive is plugged in again.
 
 ## Storage numbers
 
@@ -476,8 +511,8 @@ sections were removed:
 - **Video Translation (ElevenLabs)** and **AI Shorts / UGC (fal.ai)**: those
   features are not part of this fork. The `dub voice` button is hidden unless a
   legacy ElevenLabs key exists.
-- The AI Agent tab is not labelled BYOK any more: it runs through the keyless
-  MCP flow.
+- The AI-agent how-to moved into **Settings** (its three steps and the MCP
+  card); the old `/ai-agent` URL redirects there. The flow is keyless.
 
 ### What made native possible
 
@@ -786,15 +821,16 @@ and TransNetV2/YOLO are never resident together.
 | `dashboard/src/contexts/AuthContext.jsx` | exposes `geminiEnvKey` |
 | `dashboard/src/tokens.css`, `tailwind.config.js`, `index.css` | neutral night + ember-orange palette, squarer buttons |
 | `dashboard/src/main.jsx` | no landing route: `/` and `#app` both open the app |
-| `dashboard/src/lib/routes.js` | nav pages as real URLs: `/` home, `/clip-generator`, `/clip-gallery`, `/shelf`, `/playground`, `/style-profiles`, `/ai-agent`, `/youtube-studio`, `/settings`; old `#app?tab=…` links redirect to them |
+| `dashboard/src/lib/routes.js` | nav pages as real URLs: `/` home, `/clip-generator`, `/clip-gallery`, `/sorter`, `/content-planner`, `/shelf`, `/playground`, `/style-profiles`, `/youtube-studio`, `/settings`; old `#app?tab=…` links redirect to them and `/ai-agent` now lands on Settings |
 | deleted | `Landing.jsx`, `landing.css`, `SaaShortsTab`, `UGCGallery`, `AutopilotTab`, `ProcessingAnimation` |
 
 ## What the app looks like now
 
 Dark neutral chrome, ember-orange accent, top nav (Home · Clip Generator ·
-Clip Gallery · AI Agent · YouTube Studio · Settings). The landing page, the
-AI Shorts tab, the UGC gallery, Autopilot, History and Pricing are gone —
-this is a single-user local tool, not a storefront.
+Clip Gallery · Sorter · Content Planner · Archive · Collector · Download Manager
+· Playground · Style Profiles · YouTube Studio · Settings). The landing page,
+the AI Shorts tab, the UGC gallery, Autopilot, History, Pricing and the separate
+AI Agent page are gone — this is a single-user local tool, not a storefront.
 
 **No source playback while a job runs.** Pasting a URL used to embed the
 YouTube player and mirror playback while downloading. The log tail and status

@@ -1,4 +1,4 @@
-"""Per-clip review state for the Clip Gallery: posted-on platforms / archived.
+"""Per-clip review state for the Clip Gallery: status / platforms / archived.
 
 The gallery is derived from the job directories on disk, so a clip has no row
 of its own to write to. This keeps a small JSON sidecar in ``Storage`` keyed by
@@ -11,6 +11,11 @@ A clip is posted per platform (this build uses Facebook and YouTube), not as a
 single switch: the same clip can be out on one and not the other. ``used`` is
 kept as the derived "on at least one platform" flag, so older state and the
 Used tab keep working.
+
+``status`` is the Sorter's decision: ``accepted`` (publishable), ``staged``
+(maybe later) or ``unreviewed`` (the default for every clip that has not been
+through the Sorter). Rejecting a clip deletes its files, so there is no stored
+``rejected`` status.
 """
 import json
 import os
@@ -24,6 +29,10 @@ _INDEX_FILE = "clip_state.json"
 
 # The platforms this build posts to, in display order.
 PLATFORMS = ("facebook", "youtube")
+
+# Sorter decisions. "unreviewed" is never stored: it is the absence of a status,
+# so a new clip needs no write before it reaches the Sorter.
+STATUSES = ("accepted", "staged", "unreviewed")
 
 _lock = threading.RLock()
 
@@ -60,6 +69,11 @@ def _platform_flags(entry):
     return {name: bool(raw.get(name)) for name in PLATFORMS}
 
 
+def _status(entry):
+    value = entry.get("status")
+    return value if value in ("accepted", "staged") else "unreviewed"
+
+
 def _public(entry):
     entry = entry or {}
     platforms = _platform_flags(entry)
@@ -71,6 +85,9 @@ def _public(entry):
         "archived": bool(entry.get("archived")),
         "used_at": entry.get("used_at"),
         "archived_at": entry.get("archived_at"),
+        # The Sorter's decision; "unreviewed" when no decision was stored yet.
+        "status": _status(entry),
+        "status_at": entry.get("status_at"),
         "platforms": platforms,
         "platform_times": {k: times.get(k) for k in PLATFORMS if times.get(k)},
     }
@@ -88,18 +105,33 @@ def snapshot():
     return {key: _public(entry) for key, entry in data.items()}
 
 
-def set_flags(job_id, index, used=None, archived=None, platforms=None):
+def set_flags(job_id, index, used=None, archived=None, platforms=None,
+              status=None):
     """Set only the flags passed; returns the stored entry.
 
     ``platforms`` is a partial ``{"facebook": bool, "youtube": bool}`` patch.
     Posting to any platform makes the clip "used"; clearing the last one makes
     it unused again (a legacy plain ``used`` is converted on the first toggle).
+
+    ``status`` is ``accepted`` or ``staged``; ``unreviewed`` clears it so the
+    clip returns to the Sorter queue.
     """
     with _lock:
         data = _read()
         key = _key(job_id, index)
         entry = dict(data.get(key) or {})
         now = time.time()
+
+        if status is not None:
+            value = str(status).strip().lower()
+            if value not in STATUSES:
+                raise ValueError(f"status must be one of {', '.join(STATUSES)}")
+            if value == "unreviewed":
+                entry.pop("status", None)
+                entry.pop("status_at", None)
+            else:
+                entry["status"] = value
+                entry["status_at"] = now
 
         if platforms is not None:
             current = _platform_flags(entry)

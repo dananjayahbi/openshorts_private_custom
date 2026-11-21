@@ -64,10 +64,11 @@ const CopyField = ({ label, value, multiline = false }) => {
     );
 };
 
-export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
+export default function ClipModal({ clip, onClose, onChanged, onDelete, deleteLabel = 'delete' }) {
     const [flags, setFlags] = useState({
         used: !!clip.used,
         archived: !!clip.archived,
+        status: clip.status || 'unreviewed',
         platforms: clip.platforms || { facebook: false, youtube: false },
     });
     const [busy, setBusy] = useState('');
@@ -109,6 +110,7 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
             setFlags({
                 used: !!next.used,
                 archived: !!next.archived,
+                status: next.status || 'unreviewed',
                 platforms: next.platforms || { facebook: false, youtube: false },
             });
             onChanged?.(clip, next);
@@ -199,6 +201,36 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                     </div>
 
                     <div>
+                        <p className="eyebrow mb-1.5">review status</p>
+                        <div className="flex gap-1.5">
+                            {[
+                                ['accepted', 'Accepted'],
+                                ['staged', 'Staging'],
+                                ['unreviewed', 'Clear'],
+                            ].map(([id, label]) => {
+                                const on = (flags.status || 'unreviewed') === id;
+                                return (
+                                    <button
+                                        key={id}
+                                        type="button"
+                                        disabled={!!busy}
+                                        onClick={() => patch({ status: id }, `status-${id}`)}
+                                        className={`btn-quiet flex-1 text-xs py-1.5 px-2 ${on ? 'text-brass' : ''}`}
+                                        title={id === 'unreviewed'
+                                            ? 'Send this clip back to the Sorter queue'
+                                            : `Mark this clip as ${label.toLowerCase()}`}
+                                    >
+                                        {busy === `status-${id}`
+                                            ? <Loader2 size={12} className="animate-spin" />
+                                            : on ? <CheckCircle2 size={12} /> : <Circle size={12} />}
+                                        {label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    <div>
                         <p className="eyebrow mb-1.5">posted on</p>
                         <div className="flex gap-1.5">
                             {[['facebook', 'Facebook'], ['youtube', 'YouTube']].map(([id, label]) => {
@@ -254,7 +286,7 @@ export default function ClipModal({ clip, onClose, onChanged, onDelete }) {
                             disabled={!!busy}
                             className="btn-quiet text-xs py-1.5 px-2.5 ml-auto text-danger"
                         >
-                            <Trash2 size={13} /> delete
+                            <Trash2 size={13} /> {deleteLabel}
                         </button>
                     </div>
                 </aside>

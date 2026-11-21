@@ -79,6 +79,12 @@ export default function GalleryCard({
                     </span>
 
                     <div className="absolute bottom-1.5 right-1.5 flex items-center gap-1">
+                        {clip.status === 'accepted' && (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-ok/80 text-black lowercase">acc</span>
+                        )}
+                        {clip.status === 'staged' && (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-brass/80 text-black lowercase">stg</span>
+                        )}
                         {platforms.facebook && (
                             <span className="text-[9px] px-1 py-0.5 rounded bg-black/75 text-white lowercase">fb</span>
                         )}

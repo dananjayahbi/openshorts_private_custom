@@ -19,6 +19,9 @@ const EMPTY_FILTERS = {
     from: '',
     to: '',
     platform: 'any',
+    // The Sorter's decision. The gallery opens on publishable clips; "all" is
+    // there for cleaning up, "staged" for the maybe-later pile.
+    status: 'accepted',
     sort: 'newest',
     q: '',
 };
@@ -38,6 +41,13 @@ const PLATFORM_OPTIONS = [
     { value: 'facebook', label: 'facebook' },
     { value: 'both', label: 'both' },
     { value: 'none', label: 'not posted' },
+];
+
+const STATUS_OPTIONS = [
+    { value: 'accepted', label: 'accepted' },
+    { value: 'staged', label: 'staging' },
+    { value: 'unreviewed', label: 'unreviewed' },
+    { value: 'all', label: 'all' },
 ];
 
 const SORT_OPTIONS = [
@@ -91,13 +101,18 @@ const pageList = (page, pages) => {
     return out;
 };
 
-export default function Gallery({ onOpenArchive }) {
+export default function Gallery({ onOpenArchive, onOpenSorter }) {
     const [clips, setClips] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [actionError, setActionError] = useState('');
     const [tab, setTab] = useState('library');
     const [counts, setCounts] = useState({ used: 0, unused: 0, archived: 0 });
+    // How many clips sit in each Sorter state, ignoring the status filter, so
+    // the filter row can show the backlog at a glance.
+    const [statusCounts, setStatusCounts] = useState({
+        accepted: 0, staged: 0, unreviewed: 0,
+    });
     const [page, setPage] = useState(1);
     const [pages, setPages] = useState(0);
     const [total, setTotal] = useState(0);
@@ -124,7 +139,8 @@ export default function Gallery({ onOpenArchive }) {
 
     const scrollRef = useRef(null);
     const activeTab = TABS.find((t) => t.id === tab) || TABS[0];
-    const filtersActive = filters.date !== 'any' || filters.platform !== 'any' || !!filters.q;
+    const filtersActive = filters.date !== 'any' || filters.platform !== 'any'
+        || filters.status !== 'accepted' || !!filters.q;
 
     const fetchStaged = useCallback(async () => {
         try {
@@ -158,6 +174,7 @@ export default function Gallery({ onOpenArchive }) {
                 view: activeTab.view,
                 usage: activeTab.usage,
                 platform: filters.platform,
+                status: filters.status,
                 sort: filters.sort,
             });
             if (filters.date !== 'any') params.set('date', filters.date);
@@ -177,6 +194,7 @@ export default function Gallery({ onOpenArchive }) {
                 poster: c.poster ? getApiUrl(c.poster) : null,
             })));
             if (data.counts) setCounts(data.counts);
+            if (data.status_counts) setStatusCounts(data.status_counts);
             setPage(data.page || 1);
             setPages(data.pages || 0);
             setTotal(data.total || 0);
@@ -229,6 +247,13 @@ export default function Gallery({ onOpenArchive }) {
         // Archiving moved the file into the Archive page: the player has
         // nothing left to play, so close it instead of leaving a broken <video>.
         if (flags?.archived) setActive(null);
+        // Changing the review status can move a clip out of the current filter
+        // (accepted -> staged, for example); close the player rather than
+        // leaving it on a clip the grid no longer lists.
+        if (filters.status !== 'all' && flags?.status
+                && flags.status !== filters.status) {
+            setActive(null);
+        }
         fetchClips(page);
     };
 
@@ -479,6 +504,17 @@ export default function Gallery({ onOpenArchive }) {
                                 archive used ({counts.used})
                             </button>
                         )}
+                        {onOpenSorter && statusCounts.unreviewed > 0 && (
+                            <button
+                                type="button"
+                                onClick={onOpenSorter}
+                                className="btn-quiet text-xs py-1.5 px-2.5 text-brass"
+                                title="Review the clips that have not been accepted or staged yet"
+                            >
+                                <CheckCircle2 size={13} /> sorter
+                                <span className="readout ml-1">{statusCounts.unreviewed}</span>
+                            </button>
+                        )}
                         {onOpenArchive && (
                             <button
                                 type="button"
@@ -616,9 +652,23 @@ export default function Gallery({ onOpenArchive }) {
                         )}
                     </div>
 
-                    <div className="mt-2.5">
-                        <span className="eyebrow block mb-1">posted on</span>
-                        <div className="max-w-md">
+                    <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2">
+                        <div>
+                            <span className="eyebrow block mb-1">review status</span>
+                            <SegmentedControl
+                                options={STATUS_OPTIONS}
+                                value={filters.status}
+                                onChange={(status) => updateFilter({ status })}
+                                size="sm"
+                                columns={4}
+                            />
+                            <p className="readout normal-case text-[11px] text-muted mt-1">
+                                accepted {statusCounts.accepted} · staging {statusCounts.staged}
+                                {' · '}unreviewed {statusCounts.unreviewed}
+                            </p>
+                        </div>
+                        <div>
+                            <span className="eyebrow block mb-1">posted on</span>
                             <SegmentedControl
                                 options={PLATFORM_OPTIONS}
                                 value={filters.platform}
@@ -704,8 +754,25 @@ export default function Gallery({ onOpenArchive }) {
                             </>
                         ) : (
                             <>
-                                <p className="text-lg mb-2 lowercase">No clips found yet.</p>
-                                <p className="text-sm lowercase">Process some videos to populate your gallery!</p>
+                                <p className="text-lg mb-2 lowercase">
+                                    {filters.status === 'accepted'
+                                        ? 'No accepted clips yet.'
+                                        : 'No clips found yet.'}
+                                </p>
+                                <p className="text-sm lowercase mb-3">
+                                    {filters.status === 'accepted'
+                                        ? 'Review the new clips in the Sorter — accepted ones appear here.'
+                                        : 'Process some videos to populate your gallery!'}
+                                </p>
+                                {onOpenSorter && statusCounts.unreviewed > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={onOpenSorter}
+                                        className="btn-primary text-xs py-1.5 px-3"
+                                    >
+                                        <CheckCircle2 size={13} /> open sorter ({statusCounts.unreviewed})
+                                    </button>
+                                )}
                             </>
                         )}
                     </div>

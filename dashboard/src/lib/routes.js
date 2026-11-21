@@ -19,12 +19,13 @@ export const TAB_PATHS = {
   home: '/',
   dashboard: '/clip-generator',
   gallery: '/clip-gallery',
+  sorter: '/sorter',
+  planner: '/content-planner',
   archive: '/archive',
   collector: '/shelf',
   downloads: '/download-manager',
   playground: '/playground',
   profiles: '/style-profiles',
-  'ai-agent': '/ai-agent',
   thumbnails: '/youtube-studio',
   settings: '/settings',
 };
@@ -35,18 +36,22 @@ export const DEFAULT_TAB = 'home';
 // Kept in one place so a shared link never lands on an empty shell.
 const PATH_ALIASES = {
   '/home': 'home',
+  // The AI Agent page moved into Settings; old links land on the section
+  // instead of a blank home.
+  '/ai-agent': 'settings',
 };
 
 const PAGE_TITLES = {
   home: 'Clip Studio',
   dashboard: 'Clip Generator · Clip Studio',
   gallery: 'Clip Gallery · Clip Studio',
+  sorter: 'Sorter · Clip Studio',
+  planner: 'Content Planner · Clip Studio',
   archive: 'Archive · Clip Studio',
   collector: 'Collector · Clip Studio',
   downloads: 'Download Manager · Clip Studio',
   playground: 'Playground · Clip Studio',
   profiles: 'Style Profiles · Clip Studio',
-  'ai-agent': 'AI Agent · Clip Studio',
   thumbnails: 'YouTube Studio · Clip Studio',
   settings: 'Settings · Clip Studio',
 };
@@ -73,6 +78,7 @@ export function tabFromPath(pathname) {
 // Renamed tabs that may still sit in localStorage or in an old deep link.
 export function normalizeTab(tab) {
   if (tab === 'history') return 'gallery';  // the pre-redesign name of the Clip Gallery
+  if (tab === 'ai-agent') return 'settings';  // the agent how-to moved into Settings
   return TAB_PATHS[tab] ? tab : DEFAULT_TAB;
 }
 

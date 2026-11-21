@@ -26,6 +26,7 @@ class TestStore:
         assert clip_state.flags("job-1", 0) == {
             "used": False, "archived": False,
             "used_at": None, "archived_at": None,
+            "status": "unreviewed", "status_at": None,
             "platforms": {"facebook": False, "youtube": False},
             "platform_times": {},
         }
@@ -67,6 +68,26 @@ class TestStore:
         assert clip_state.prune([("kept", 0)]) == 1
         assert clip_state.flags("gone", 0)["used"] is False
         assert clip_state.flags("kept", 0)["used"] is True
+
+    def test_a_sorter_status_round_trips_and_clears(self, store):
+        assert clip_state.flags("job-1", 0)["status"] == "unreviewed"
+
+        flags = clip_state.set_flags("job-1", 0, status="accepted")
+        assert flags["status"] == "accepted"
+        assert flags["status_at"]
+
+        assert clip_state.set_flags("job-1", 1, status="staged")["status"] == "staged"
+
+        # Clearing sends it back to the Sorter queue and leaves no dead entry.
+        flags = clip_state.set_flags("job-1", 0, status="unreviewed")
+        assert flags["status"] == "unreviewed"
+        data = json.loads((store / "clip_state.json").read_text())
+        assert set(data) == {"job-1:1"}
+        assert data["job-1:1"]["status"] == "staged"
+
+    def test_an_unknown_status_is_refused(self, store):
+        with pytest.raises(ValueError):
+            clip_state.set_flags("job-1", 0, status="rejected")
 
 
 class TestPlatforms:
@@ -160,6 +181,32 @@ class TestGalleryApi:
         assert body["clips"][0]["used"] is False
         assert body["clips"][0]["archived"] is False
         assert body["counts"] == {"used": 0, "unused": 3, "archived": 0}
+
+    def test_status_filter_defaults_to_everything_and_narrows_on_request(self, gallery):
+        # The API keeps the old unfiltered default; the dashboard asks for
+        # accepted explicitly, so old callers and these tests keep working.
+        assert len(_titles(gallery.get("/api/gallery/clips"))) == 3
+
+        gallery.patch("/api/gallery/clip/job-a/0", json={"status": "accepted"})
+        gallery.patch("/api/gallery/clip/job-a/1", json={"status": "staged"})
+
+        assert _titles(gallery.get("/api/gallery/clips?status=accepted")) == ["A0"]
+        assert _titles(gallery.get("/api/gallery/clips?status=staged")) == ["A1"]
+        assert sorted(_titles(gallery.get("/api/gallery/clips?status=unreviewed"))) == ["B0"]
+        body = gallery.get("/api/gallery/clips").json()
+        assert body["status_counts"] == {
+            "accepted": 1, "staged": 1, "unreviewed": 1,
+        }
+
+    def test_status_can_be_changed_and_cleared(self, gallery):
+        body = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"status": "accepted"}).json()
+        assert body["status"] == "accepted"
+        body = gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"status": "unreviewed"}).json()
+        assert body["status"] == "unreviewed"
+        assert gallery.patch("/api/gallery/clip/job-a/0",
+                             json={"status": "rejected"}).status_code == 400
 
     def test_marking_used_shows_in_the_right_filters(self, gallery):
         r = gallery.patch("/api/gallery/clip/job-a/0", json={"used": True})

@@ -34,11 +34,19 @@ def test_settings_keeps_only_the_pipeline_key_and_agent_howto():
     assert "falKey" not in _read("App.jsx")
 
 
-def test_the_agent_is_not_labelled_byok():
-    """The keyless MCP flow is the whole point: no user key is required."""
+def test_the_agent_howto_lives_in_settings_not_its_own_page():
+    """The AI Agent page was folded into Settings; old /ai-agent links land there."""
     app = _read("App.jsx")
-    agent = [line for line in app.splitlines() if "label: 'AI Agent'" in line][0]
-    assert "byok" not in agent
+    page = _read("components/SettingsPage.jsx")
+    assert "activeTab === 'ai-agent'" not in app
+    assert "label: 'AI Agent'" not in app
+    assert "AgentSection" in page
+    assert "Your agent drives the pipeline" in page
+    assert "process_video" in page and "render_plan" in page
+    for step in ("1. Bring a source", "2. Read the transcript", "3. Render the cuts"):
+        assert step in page
+    # The keyless MCP flow is the whole point: no user key is required.
+    assert "no model key" in page
 
 
 def test_publish_and_dub_buttons_only_exist_when_configured():

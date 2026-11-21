@@ -16,21 +16,23 @@ Docker.
 |---|---|
 | Home | Library/GPU/disk snapshot, recent clips, one-click new clip, **unload vram** |
 | Clip Generator | Upload, link, or pick from the Collector; style profile + captions before the render; a bulk queue that loops the same screen and retries failures once; **streamed video** split with its own marked box + prevention area per queued video; no clip-count cap (hours-long sources can yield 100s); stop a run and remove its partial files |
-| Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, bulk-archive the selection, staged one-platform archive buttons |
+| Clip Gallery | Compact score tiles with a full-viewport player, five tags, per-platform marks, single/bulk delete, bulk-archive the selection, staged one-platform archive buttons; the **status** filter opens on accepted clips |
+| Sorter | Watch one clip at a time and accept it (left), reject/delete it (right), or park it in staging; keyboard shortcuts for fast review |
+| Content Planner | Facebook-Creator-Studio-style month calendar; add accepted clips to a day, see icon thumbnails, and open the usual clip modal to watch/mark them |
 | Archive | Permanent clip store with advanced filters; push videos to external storage vaults and play them back when the device is connected |
 | Collector | Shelf of links and files; download later, queue, process |
 | Download Manager | Fetch full links into temp storage; cut each into its own part length and save the parts to the Collector |
 | Playground | Try caption looks and output shapes on a real clip, save the result as a profile |
 | Style Profiles | Saved caption/format bundles; apply one in the Clip Generator |
-| AI Agent | MCP connection snippets (Claude, ChatGPT, Cursor, n8n) |
 | YouTube Studio | Titles, descriptions and thumbnails for the clips |
-| Settings | Five-level AI provider chain (any OpenAI-compatible endpoint or Gemini), editable prompts, MCP how-to |
+| Settings | Five-level AI provider chain (any OpenAI-compatible endpoint or Gemini), editable prompts, and the AI-agent/MCP how-to |
 
 Every page has its own URL, so it can be bookmarked, shared and reloaded:
-`/` (Home), `/clip-generator`, `/clip-gallery`, `/archive`, `/shelf` (Collector),
-`/download-manager`, `/playground`, `/style-profiles`, `/ai-agent`,
-`/youtube-studio`, `/settings`.
-Old `#app?tab=…` links are redirected to the matching page.
+`/` (Home), `/clip-generator`, `/clip-gallery`, `/sorter`, `/content-planner`,
+`/archive`, `/shelf` (Collector), `/download-manager`, `/playground`,
+`/style-profiles`, `/youtube-studio`, `/settings`.
+Old `#app?tab=…` links are redirected to the matching page, and the removed
+`/ai-agent` page redirects to Settings.
 
 Every clip's copy is shaped for Facebook and YouTube: a Facebook post (title,
 two blank lines, five hashtags), a clean YouTube title with no hashtags, a

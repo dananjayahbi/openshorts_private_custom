@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-    AlertCircle, Check, ChevronDown, ChevronUp, Key, Loader2, RotateCcw,
-    Shield, Sparkles, Zap,
+    AlertCircle, Bot, Check, CheckCircle2, ChevronDown, ChevronUp, Key,
+    Loader2, RotateCcw, Shield, Sparkles, Upload, Users, Zap,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import McpConnectCard from './McpConnectCard';
@@ -391,6 +391,73 @@ function PromptEditor({ prompts, onReload }) {
     );
 }
 
+// The AI Agent page was folded into Settings: the three steps, the MCP card
+// and the localhost warning are the whole content, and nobody wants a separate
+// page for a setup guide. Old /ai-agent links land here (lib/routes.js).
+function AgentSection() {
+    return (
+        <section className="card p-5 sm:p-6 mb-6" id="agent">
+            <p className="eyebrow flex items-center gap-2 mb-1.5">
+                <Bot size={12} /> AI agent
+            </p>
+            <h2 className="font-display lowercase text-xl text-ink mb-1">
+                Your agent drives the pipeline
+            </h2>
+            <p className="text-sm text-muted leading-relaxed max-w-2xl mb-4">
+                Connect Claude, ChatGPT, Cursor or n8n to the built-in MCP server. An agent
+                can add a video, choose the moments, render clips and recut them — the
+                transcript flow needs no model key of its own.
+            </p>
+
+            <div className="grid md:grid-cols-3 gap-3">
+                <div className="rounded-card border border-rule bg-paper2/60 p-4 space-y-2">
+                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center">
+                        <Upload size={16} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase text-sm">1. Bring a source</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                        <code className="text-ink2">process_video</code> takes a YouTube link or a
+                        direct video URL; <code className="text-ink2">create_upload</code> accepts a
+                        local file. <code className="text-ink2">get_job_status</code> follows the job.
+                    </p>
+                </div>
+
+                <div className="rounded-card border border-rule bg-paper2/60 p-4 space-y-2">
+                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center">
+                        <Users size={16} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase text-sm">2. Read the transcript</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                        <code className="text-ink2">prepare_transcript</code> downloads and transcribes
+                        once; <code className="text-ink2">get_transcript</code> returns the timestamped
+                        words so the agent can pick moments itself.
+                    </p>
+                </div>
+
+                <div className="rounded-card border border-rule bg-paper2/60 p-4 space-y-2">
+                    <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center">
+                        <CheckCircle2 size={16} className="text-brass" />
+                    </div>
+                    <h3 className="font-medium text-ink lowercase text-sm">3. Render the cuts</h3>
+                    <p className="text-xs text-muted leading-relaxed">
+                        <code className="text-ink2">render_plan</code> renders the agent&apos;s chosen
+                        cuts from that same source; <code className="text-ink2">list_clips</code>,
+                        {' '}<code className="text-ink2">add_subtitles</code> and
+                        {' '}<code className="text-ink2">recut_clip</code> finish them.
+                    </p>
+                </div>
+            </div>
+
+            <div className="mt-4"><McpConnectCard cloud={false} /></div>
+
+            <p className="text-xs text-muted leading-relaxed mt-3">
+                Running locally, the MCP endpoint has no authentication: anything that can reach
+                this machine can drive it. Keep it bound to localhost.
+            </p>
+        </section>
+    );
+}
+
 export default function SettingsPage({ billingEnabled, isManaged, onChoosePlan }) {
     const [levels, setLevels] = useState(null);
     const [providers, setProviders] = useState([]);
@@ -453,7 +520,7 @@ export default function SettingsPage({ billingEnabled, isManaged, onChoosePlan }
                         ) : null}
 
                         <PromptEditor prompts={prompts} onReload={loadPrompts} />
-                        <div className="mb-6"><McpConnectCard cloud={false} /></div>
+                        <AgentSection />
                     </>
                 )}
 

@@ -20,6 +20,7 @@ import storage
 import collector
 import downloads
 import clip_state
+import content_plan
 import archive
 import streamer_layout
 import re
@@ -11015,6 +11016,10 @@ def _gallery_entry(job_id, output_dir, index, clip, created_at):
 GALLERY_DATE_PRESETS = ("any", "today", "yesterday", "week", "month", "custom")
 GALLERY_PLATFORMS = ("any", "youtube", "facebook", "both", "none")
 GALLERY_SORTS = ("newest", "oldest", "longest", "shortest", "score")
+# Sorter decisions. "any" is the API's unfiltered default: the dashboard sends
+# "accepted" so the gallery opens on publishable clips, while older callers and
+# the tests keep seeing the whole library.
+GALLERY_STATUSES = ("any", "accepted", "staged", "unreviewed")
 
 
 def _gallery_date_window(preset: str, date_from: str, date_to: str):
@@ -11076,7 +11081,7 @@ def _gallery_matches_query(entry, query: str) -> bool:
 async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
                             offset: Optional[int] = None,
                             view: str = "active", usage: str = "any",
-                            platform: str = "any",
+                            platform: str = "any", status: str = "any",
                             date: str = "any", date_from: str = "", date_to: str = "",
                             sort: str = "newest", q: str = ""):
     """Every clip this instance has rendered, paged and filtered server-side.
@@ -11094,6 +11099,9 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
     - ``view``     active (default: not archived) | archived | all
     - ``usage``    any | used | unused — the per-clip "I already posted this" mark
     - ``platform`` any | youtube | facebook | both | none — per-platform marks
+    - ``status``   any | accepted | staged | unreviewed — the Sorter decision.
+                   The dashboard opens on ``accepted``; ``any`` is the API
+                   default so old callers keep seeing the whole library.
     - ``date``     any | today | yesterday | week | month | custom (with
                    ``date_from``/``date_to`` as YYYY-MM-DD, inclusive)
     - ``sort``     newest | oldest | longest | shortest | score
@@ -11106,6 +11114,7 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
     view = view if view in ("active", "archived", "all") else "active"
     usage = usage if usage in ("used", "unused") else "any"
     platform = platform if platform in GALLERY_PLATFORMS else "any"
+    status = status if status in GALLERY_STATUSES else "any"
     date = date if date in GALLERY_DATE_PRESETS else "any"
     sort = sort if sort in GALLERY_SORTS else "newest"
     query = (q or "").strip()[:100]
@@ -11120,8 +11129,10 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
     storage.ensure_media()
     if not storage.media_available():
         # Unplugged media drive: an empty library with a reason beats a 500.
-        return {            "clips": [], "total": 0,
+        return {
+            "clips": [], "total": 0,
             "counts": {"unused": 0, "used": 0, "archived": 0},
+            "status_counts": {"accepted": 0, "staged": 0, "unreviewed": 0},
             "limit": limit, "page": 1, "pages": 0, "offset": 0,
             "has_more": False, "media_offline": True,
         }
@@ -11156,9 +11167,14 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
 
     matched = []
     counts = {"unused": 0, "used": 0, "archived": 0}
+    # The Sorter's badges: how many active clips sit in each decision state,
+    # before the status filter narrows the page. Archived clips are not part of
+    # the review queue.
+    status_counts = {"accepted": 0, "staged": 0, "unreviewed": 0}
     known = []
     states = await asyncio.to_thread(clip_state.snapshot)
     empty = {"used": False, "archived": False, "used_at": None, "archived_at": None,
+             "status": "unreviewed", "status_at": None,
              "platforms": {"facebook": False, "youtube": False}, "platform_times": {}}
     for mtime, job_id, path, meta_path in job_dirs:
         if start_epoch is not None and mtime < start_epoch:
@@ -11181,6 +11197,13 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
             if not _gallery_platform_match(state, platform):
                 continue
             if not _gallery_matches_query(entry, query):
+                continue
+            clip_status = state.get("status") or "unreviewed"
+            if not state["archived"]:
+                if clip_status not in status_counts:
+                    clip_status = "unreviewed"
+                status_counts[clip_status] += 1
+            if status != "any" and clip_status != status:
                 continue
             if state["archived"]:
                 counts["archived"] += 1
@@ -11266,6 +11289,7 @@ async def get_gallery_clips(request: Request, limit: int = 24, page: int = 1,
         "clips": clips,
         "total": total,
         "counts": counts,
+        "status_counts": status_counts,
         "limit": limit,
         "page": page,
         "pages": pages,
@@ -11318,13 +11342,20 @@ async def set_gallery_clip_state(job_id: str, index: int, request: Request):
             raise HTTPException(
                 status_code=400,
                 detail=f"unknown platform(s): {', '.join(unknown)}")
+    status = body.get("status")
+    if status is not None:
+        status = str(status).strip().lower()
+        if status not in clip_state.STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status must be one of {', '.join(clip_state.STATUSES)}")
     if ("used" not in body and "archived" not in body
-            and platforms is None):
+            and platforms is None and status is None):
         raise HTTPException(status_code=400, detail="Nothing to change")
     archived_flag = body.get("archived")
     flags = await asyncio.to_thread(
         clip_state.set_flags, job_id, index,
-        used=body.get("used"), platforms=platforms)
+        used=body.get("used"), platforms=platforms, status=status)
     # The gallery's archive toggle is the entry point into the Archive page:
     # "archive" moves the file into the permanent store, "restore" moves it
     # back while the job folder (and its metadata) still exists.
@@ -11446,6 +11477,37 @@ def _valid_gallery_ref(job_id, index) -> bool:
         return False
 
 
+def _gallery_ref_entry(job_id: str, index: int, state: dict):
+    """The gallery card for one clip reference, or None when it is gone.
+
+    The Content Planner stores refs, not copies of the metadata, so this is
+    what turns a planned ref into the same card the gallery shows. It is used
+    per planned clip (tens, not hundreds), so a metadata read per ref is fine.
+    """
+    if not _valid_gallery_ref(job_id, index):
+        return None
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    metas = glob.glob(os.path.join(job_dir, "*_metadata.json"))
+    if not metas:
+        return None
+    try:
+        with open(metas[0], encoding="utf-8") as f:
+            data = json.load(f)
+        mtime = os.path.getmtime(metas[0])
+    except (OSError, json.JSONDecodeError):
+        return None
+    shorts = data.get("shorts") or []
+    if index < 0 or index >= len(shorts):
+        return None
+    created = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+    entry = _gallery_entry(job_id, job_dir, index, shorts[index], created)
+    if entry is None:
+        return None
+    entry.update(state or {})
+    entry["status"] = entry.get("status") or "unreviewed"
+    return entry
+
+
 @app.delete("/api/gallery/clip/{job_id}/{index}")
 async def delete_gallery_clip(job_id: str, index: int):
     """Delete one rendered clip from disk (the gallery card disappears)."""
@@ -11505,6 +11567,135 @@ async def delete_gallery_clips(request: Request):
     deleted, files, failed = await asyncio.to_thread(clean)
     return {"deleted": deleted, "files": files, "failed": failed}
 
+
+# --- Content Planner: the publishing calendar -------------------------------
+@app.get("/api/planner")
+async def planner_list(request: Request):
+    """Planned clips grouped by day for an inclusive ``from``/``to`` window.
+
+    The plan file holds refs only; each ref is expanded into the same card the
+    Clip Gallery uses (title, poster, duration, platform marks), so the calendar
+    shows "fb used" / "yt used" without a second round-trip per thumbnail.
+    """
+    start = (request.query_params.get("from") or "").strip()
+    end = (request.query_params.get("to") or "").strip()
+    if start and not content_plan.valid_date(start):
+        raise HTTPException(status_code=400, detail="from must be YYYY-MM-DD")
+    if end and not content_plan.valid_date(end):
+        raise HTTPException(status_code=400, detail="to must be YYYY-MM-DD")
+    storage.ensure_media()
+    if not storage.media_available():
+        return {"days": {}, "total": 0, "media_offline": True}
+    days = await asyncio.to_thread(content_plan.days_between, start, end)
+    states = await asyncio.to_thread(clip_state.snapshot)
+    empty_state = {
+        "used": False, "archived": False, "used_at": None, "archived_at": None,
+        "status": "unreviewed", "status_at": None,
+        "platforms": {"facebook": False, "youtube": False}, "platform_times": {},
+    }
+    out = {}
+    entries = []
+    for day, refs in sorted(days.items()):
+        cards = []
+        for ref in refs:
+            key = f"{ref['job_id']}:{ref['index']}"
+            entry = _gallery_ref_entry(
+                ref["job_id"], ref["index"], states.get(key) or empty_state)
+            if entry is None:
+                continue
+            entry["planned_on"] = day
+            cards.append(entry)
+            entries.append(entry)
+        if cards:
+            out[day] = cards
+
+    # Fill missing posters for the calendar's small thumbnails. Four at a time,
+    # like the gallery: a month of planned clips must not start 60 ffmpegs.
+    missing = [entry for entry in entries if not entry.get("poster")]
+    if missing:
+        slots = asyncio.Semaphore(4)
+
+        def _poster_for(entry):
+            job_dir = os.path.join(OUTPUT_DIR, entry["job_id"])
+            clip_path = _gallery_clip_file(job_dir, entry["index"])
+            if not clip_path:
+                return
+            made = _make_gallery_poster(job_dir, clip_path, entry["index"],
+                                        entry.get("duration"))
+            if made:
+                entry["poster"] = f"/videos/{entry['job_id']}/{os.path.basename(made)}"
+                entry["poster_width"], entry["poster_height"] = _poster_size(made)
+
+        async def _fill(entry):
+            async with slots:
+                await asyncio.to_thread(_poster_for, entry)
+
+        await asyncio.gather(*(_fill(entry) for entry in missing))
+
+    return {"days": out, "total": len(entries)}
+
+
+@app.post("/api/planner")
+async def planner_add(request: Request):
+    """``{"date": "YYYY-MM-DD", "job_id": "...", "index": 0}``."""
+    _require_media()
+    body = await _request_json(request)
+    day = str(body.get("date") or "").strip()
+    job_id = str(body.get("job_id") or "")
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="index must be an integer")
+    if not content_plan.valid_date(day):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    if not _valid_gallery_ref(job_id, index):
+        raise HTTPException(status_code=400, detail="Invalid clip")
+    if index >= _job_clip_count(job_id):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    try:
+        result = await asyncio.to_thread(content_plan.add, day, job_id, index)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    flags = await asyncio.to_thread(clip_state.flags, job_id, index)
+    entry = await asyncio.to_thread(_gallery_ref_entry, job_id, index, flags)
+    return {**result, "clip": entry}
+
+
+@app.post("/api/planner/remove")
+async def planner_remove(request: Request):
+    body = await _request_json(request)
+    day = str(body.get("date") or "").strip()
+    job_id = str(body.get("job_id") or "")
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="index must be an integer")
+    if not content_plan.valid_date(day) or not _valid_gallery_ref(job_id, index):
+        raise HTTPException(status_code=400, detail="Invalid day or clip")
+    result = await asyncio.to_thread(content_plan.remove, day, job_id, index)
+    return result
+
+
+@app.post("/api/planner/move")
+async def planner_move(request: Request):
+    """Move a planned clip to another day (the calendar's drag/drop)."""
+    body = await _request_json(request)
+    from_day = str(body.get("from") or "").strip()
+    to_day = str(body.get("to") or "").strip()
+    job_id = str(body.get("job_id") or "")
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="index must be an integer")
+    if (not content_plan.valid_date(from_day)
+            or not content_plan.valid_date(to_day)
+            or not _valid_gallery_ref(job_id, index)):
+        raise HTTPException(status_code=400, detail="Invalid day or clip")
+    try:
+        return await asyncio.to_thread(
+            content_plan.move, from_day, to_day, job_id, index)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════════
